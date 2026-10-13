@@ -67,7 +67,9 @@ export function Dashboard({ store, width, height, rows, actions, dialog, selecte
     nearby: data.nearby.map((p): Entry => ({ type: 'nearby', key: `n:${p.id}`, peer: p })),
   };
   const entries: Entry[] = Object.values(sections).flat();
-  let selected = entries.findIndex((e) => e.key === selectedKey);
+  // the banner has two actions side by side: start a race ('banner') and solo practice ('banner:solo')
+  const bannerSolo = selectedKey === 'banner:solo';
+  let selected = bannerSolo ? 0 : entries.findIndex((e) => e.key === selectedKey);
   // nothing picked (yet, or it's gone): an open request first, so enter answers it – else the banner
   if (selected === -1) selected = sections.requests.length ? 1 : 0;
   const current = entries[selected];
@@ -115,7 +117,7 @@ export function Dashboard({ store, width, height, rows, actions, dialog, selecte
 
   const activate = (e: Entry | undefined) => {
     if (!e) return;
-    if (e.type === 'banner') return void actions.newRace();
+    if (e.type === 'banner') return void (bannerSolo ? actions.soloRace() : actions.newRace());
     if (e.type === 'request') {
       const r = e.request;
       if (r.kind === 'invite') return acceptInvite(r.invite);
@@ -136,8 +138,8 @@ export function Dashboard({ store, width, height, rows, actions, dialog, selecte
   };
 
   useWheel((dir) => {
-    if (!entries.length) return;
-    onSelect(entries[Math.max(0, Math.min(entries.length - 1, selected + dir))]!.key);
+    const next = Math.max(0, Math.min(entries.length - 1, selected + dir));
+    if (next !== selected) onSelect(entries[next]!.key);
   }, !dialog && !commandMode);
 
   useInput(
@@ -149,10 +151,14 @@ export function Dashboard({ store, width, height, rows, actions, dialog, selecte
         return;
       }
       const move = (d: number) => {
-        if (!entries.length) return;
         const next = Math.max(0, Math.min(entries.length - 1, selected + d));
-        onSelect(entries[next]!.key);
+        // staying on the banner keeps whichever of its two actions is picked
+        if (next !== selected) onSelect(entries[next]!.key);
       };
+      if (current?.type === 'banner') {
+        if (key.leftArrow || input === 'h') return onSelect('banner');
+        if (key.rightArrow || input === 'l') return onSelect('banner:solo');
+      }
       if (key.upArrow || input === 'k') return move(-1);
       if (key.downArrow || input === 'j') return move(1);
       if (key.pageUp) return move(-10);
@@ -231,7 +237,7 @@ export function Dashboard({ store, width, height, rows, actions, dialog, selecte
 
   const hints = (() => {
     const base = ['↑↓ select'];
-    if (!current || current.type === 'banner') base.push('enter start a race', 's solo');
+    if (!current || current.type === 'banner') base.push('←→ race / solo', bannerSolo ? 'enter solo practice' : 'enter start a race');
     else if (current.type === 'request') {
       base.push(current.request.kind === 'invite' ? 'enter join' : 'enter accept', 'x decline');
     } else if (current.type === 'nearby') base.push('enter add friend');
@@ -245,7 +251,12 @@ export function Dashboard({ store, width, height, rows, actions, dialog, selecte
   const empty = data.friends.length === 0 && data.requests.length === 0;
   return (
     <Box flexDirection="column" width={width} height={height}>
-      <Banner width={width} compact={compact} selected={current?.type === 'banner'} />
+      <Banner
+        width={width}
+        compact={compact}
+        selected={current?.type === 'banner' ? (bannerSolo ? 'solo' : 'race') : null}
+        animate={store.isFocused && !dialog && !commandMode}
+      />
       <Box flexDirection={side ? 'row' : 'column'} height={mainHeight} width={width} alignItems="flex-start" overflow="hidden">
         <Box flexDirection="column" height={listHeight} width={listWidth} paddingX={1} overflow="hidden" flexShrink={0}>
           {visible.map((l, i) => {

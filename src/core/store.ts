@@ -407,6 +407,11 @@ export class AppStore {
     this.network.get(id)?.send({ t: 'presence', away: !this.focused, ...(this.games.racing ? { racing: true } : {}) });
   }
 
+  /** False while the terminal window is in the background (if the terminal reports focus). */
+  get isFocused(): boolean {
+    return this.focused;
+  }
+
   notificationsEnabled(): boolean {
     return loadConfig(this.opts.paths)?.notifications !== false;
   }

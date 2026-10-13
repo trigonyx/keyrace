@@ -95,8 +95,9 @@ In a race, whoever is done keeps watching the others live until everyone is thro
 | Dashboard | |
 |---|---|
 | `↑` `↓` / `j` `k` | select |
-| `enter` | start a race (banner) · invite a friend · accept a request · join an invite · add someone from Nearby |
-| `s` | solo practice |
+| `←` `→` / `h` `l` | on the banner: switch between "Start a race" and "Solo practice" |
+| `enter` | start a race or solo practice (banner) · invite a friend · accept a request · join an invite · add someone from Nearby |
+| `s` | solo practice (from anywhere on the dashboard) |
 | `x` | decline a request or invite |
 | `a` | add a friend by IP |
 | `r` / `d` | rename (your own nickname) / remove a friend |
@@ -205,7 +206,8 @@ Everything lives in `~/.keyrace/` (readable only by you):
 - **Fair play:** the host ignores progress that runs backwards or is faster than 350 WPM, and a final report like that ends the run with the last believable numbers. There's no elaborate anti-cheat.
 - **Connections dropping:** a guest who loses the connection (or gives up) is ranked as "left" and doesn't record the race themselves. If the host goes away, the race is called off for everyone and nothing is recorded – there's no host migration.
 - **Lobby chat** is plain text, up to 200 characters, cleaned of control characters; the lobby keeps the last 50 messages.
-- **Dashboard selection:** if you haven't moved the selection yet, it starts on an open request, so `enter` answers it right away.
+- **Dashboard selection:** if you haven't moved the selection yet, it starts on an open request, so `enter` answers it right away. A new race invite is selected as soon as it arrives.
+- **Animations:** a light shimmer runs across the logo every 6 seconds while the dashboard is in front; it rests while the terminal is in the background or a dialog is open. Apart from that, only races move (countdown, clock, bars).
 
 ## Development
 

@@ -176,6 +176,34 @@ describe('screens', () => {
     }
   });
 
+  it('dashboard: ←→ on the banner picks solo practice, and enter starts it', async () => {
+    const s = store();
+    let key: string | null = null;
+    const started: string[] = [];
+    const acts = { ...actions, soloRace: async () => void started.push('solo'), newRace: async () => void started.push('race') };
+    const props = () => ({ store: s, width: 100, height: 29, rows: 32, actions: acts, dialog: null, selectedKey: key, history: [], onSelect: (k: string | null) => void (key = k) });
+    const r = render(createElement(Dashboard, props()));
+    const tick = () => new Promise((res) => setTimeout(res, 20));
+    await tick();
+    r.stdin.write('\u001b[C'); // →
+    await tick();
+    expect(key).toBe('banner:solo');
+    r.rerender(createElement(Dashboard, props()));
+    expect(frame(r)).toMatch(/❯\s+Solo practice/);
+    expect(frame(r)).toContain('enter solo practice');
+    r.stdin.write('\r');
+    await tick();
+    expect(started).toEqual(['solo']);
+    r.stdin.write('\u001b[D'); // ←
+    await tick();
+    expect(key).toBe('banner');
+    r.rerender(createElement(Dashboard, props()));
+    r.stdin.write('\r');
+    await tick();
+    expect(started).toEqual(['solo', 'race']);
+    r.unmount();
+  });
+
   it('lobby: players with their status and the chat', () => {
     const s = store();
     const g = game(s, {
