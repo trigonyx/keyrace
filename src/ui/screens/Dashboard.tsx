@@ -1,5 +1,5 @@
 import { Box, Text, useInput } from 'ink';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { DiscoveredPeer } from '../../core/discovery.js';
 import type { AppStore, FriendView, RequestEntry } from '../../core/store.js';
 import type { PendingInvite } from '../../game/session.js';
@@ -72,6 +72,15 @@ export function Dashboard({ store, width, height, rows, actions, dialog, selecte
   if (selected === -1) selected = sections.requests.length ? 1 : 0;
   const current = entries[selected];
   const selectedFriend = current?.type === 'friend' && current.friend.state === 'accepted' ? current.friend : null;
+
+  // a new race invite gets selected, so enter joins it (invites are what people react to right away)
+  const newestInvite = data.requests.find((r) => r.kind === 'invite');
+  const newestKey = newestInvite?.kind === 'invite' ? `i:${newestInvite.invite.gid}` : null;
+  const seenInvite = useRef<string | null>(null);
+  useEffect(() => {
+    if (newestKey && newestKey !== seenInvite.current && !dialog) onSelect(newestKey);
+    seenInvite.current = newestKey;
+  }, [newestKey]);
 
   const [commandMode, setCommandMode] = useState(false);
   // set synchronously so characters typed right after "/" are not lost

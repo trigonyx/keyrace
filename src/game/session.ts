@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import type { Wire, WirePlayer, WireStanding } from '../core/protocol.js';
-import { MAX_CHAT } from '../core/protocol.js';
+import { MAX_CHAT, MAX_PLAYERS } from '../core/protocol.js';
 import { sanitizeText } from '../core/sanitize.js';
 import { TypingEngine } from './engine.js';
 import * as L from './lobby.js';
@@ -150,7 +150,7 @@ export class GameManager {
 
   /** New race: invites the given friends (none = solo practice). */
   create(settings: RaceSettings, inviteIds: string[]): void {
-    const ids = inviteIds.filter((id) => this.deps.isFriend(id) && this.deps.isOnline(id));
+    const ids = this.capped(inviteIds.filter((id) => this.deps.isFriend(id) && this.deps.isOnline(id)), 1);
     if (!ids.length) return this.solo(settings);
     this.leave();
     const me = this.deps.me();
@@ -238,10 +238,21 @@ export class GameManager {
   inviteMore(ids: string[]): void {
     const h = this.hosting;
     if (!h || h.game.phase !== 'lobby') return;
-    const who = ids.filter((id) => this.deps.isFriend(id) && this.deps.isOnline(id)).map((id) => ({ id, name: this.deps.nameOf(id) }));
+    // everyone ever invited stays listed (declined, left …), so only newcomers need room
+    const known = new Set(h.lobby.players.map((p) => p.id));
+    const wanted = ids.filter((id) => this.deps.isFriend(id) && this.deps.isOnline(id));
+    const newcomers = this.capped(wanted.filter((id) => !known.has(id)), h.lobby.players.length);
+    const who = wanted.filter((id) => known.has(id) || newcomers.includes(id)).map((id) => ({ id, name: this.deps.nameOf(id) }));
     this.lobby = L.invite(h.lobby, who);
     for (const w of who) if (L.playerOf(this.lobby, w.id)?.status === 'invited') this.sendInvite(w.id);
     this.lobbyChanged();
+  }
+
+  /** At most MAX_PLAYERS in a lobby (`taken` = places already used). */
+  private capped(ids: string[], taken: number): string[] {
+    const room = Math.max(0, MAX_PLAYERS - taken);
+    if (ids.length > room) this.deps.toast(`A race has room for ${MAX_PLAYERS} players – not everyone was invited`, 'error');
+    return ids.slice(0, room);
   }
 
   /** Host: remove a player, joined or still invited. */

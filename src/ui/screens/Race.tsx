@@ -100,7 +100,12 @@ export function Race({ store, game, width, height, actions, dialog }: Props) {
         {wpm}
       </Text>
       <Text color={theme.dim}> wpm · {pct(e.accuracy())} acc</Text>
-      {mode !== 'race' ? <Text color={theme.dim}> · {e.correctWords} words</Text> : null}
+      {mode !== 'race' ? (
+        <Text color={theme.dim}>
+          {' '}
+          · {e.correctWords} {e.correctWords === 1 ? 'word' : 'words'}
+        </Text>
+      ) : null}
       {mode !== 'sudden' ? (
         <Text color={e.errors ? theme.error : theme.dim}>
           {' '}
