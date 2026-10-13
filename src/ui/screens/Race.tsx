@@ -2,7 +2,7 @@ import { Box, Text, useInput } from 'ink';
 import type { AppStore } from '../../core/store.js';
 import { wallWpm } from '../../game/engine.js';
 import type { Game } from '../../game/session.js';
-import { runLimitMs, settingsLabel } from '../../game/types.js';
+import { runLimitMs, settingsLabel, WALL } from '../../game/types.js';
 import type { Actions } from '../actions.js';
 import { BIG_HEIGHT, BigText } from '../components/BigText.js';
 import { Dialog, type DialogSpec } from '../components/Dialog.js';
@@ -27,9 +27,10 @@ const AREA = Math.max(BIG_HEIGHT, TEXT_LINES + 2);
 const GO_MS = 900;
 
 /** Danger bar for sudden death: fills up as the wall gets closer (10 words ahead = empty). */
-function WallBar({ gap, wpm, width }: { gap: number; wpm: number; width: number }) {
+function WallBar({ gap, wpm, width, startsIn }: { gap: number; wpm: number; width: number; startsIn: number }) {
   const words = gap / 5;
-  const danger = Math.max(0, Math.min(1, 1 - words / 10));
+  // during the grace period the wall hasn't moved yet: nothing to fear
+  const danger = wpm ? Math.max(0, Math.min(1, 1 - words / 10)) : 0;
   const barWidth = Math.max(6, Math.min(24, width - 44));
   const filled = Math.round(danger * barWidth);
   const color = danger > 0.75 ? theme.error : danger > 0.45 ? theme.warning : theme.success;
@@ -42,7 +43,7 @@ function WallBar({ gap, wpm, width }: { gap: number; wpm: number; width: number 
       <Text color={color}>{'█'.repeat(filled)}</Text>
       <Text color={theme.border}>{'░'.repeat(barWidth - filled)}</Text>
       <Text color={theme.faint}>▏ </Text>
-      <Text color={wpm ? color : theme.dim}>{wpm ? ahead : 'starts in a moment'}</Text>
+      <Text color={wpm ? color : theme.dim}>{wpm ? ahead : `starts in ${Math.ceil(startsIn / 1000)}s`}</Text>
     </Text>
   );
 }
@@ -165,7 +166,7 @@ export function Race({ store, game, width, height, actions, dialog }: Props) {
         <Text> </Text>
         <Box flexDirection="column" alignItems="center" width={width - 2} flexShrink={0}>
           {e.status === 'countdown' ? <Text color={theme.dim}>get ready …</Text> : statLine}
-          {mode === 'sudden' && e.status === 'racing' ? <WallBar gap={e.wallGap()} wpm={wallWpm(elapsed)} width={width - 2} /> : null}
+          {mode === 'sudden' && e.status === 'racing' ? <WallBar gap={e.wallGap()} wpm={wallWpm(elapsed)} width={width - 2} startsIn={WALL.graceMs - elapsed} /> : null}
         </Box>
       </Box>
       {dialog ? <Dialog spec={dialog} width={width} /> : null}

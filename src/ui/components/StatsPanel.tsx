@@ -101,10 +101,11 @@ export function StatsPanel({ store, friend, width, compact }: { store: AppStore;
               <>
                 {!compact ? <Text> </Text> : null}
                 <Text color={theme.dim} wrap="truncate-end">
-                  Last duel · {settingsLabel(h.last)} · {shortTime(h.last.ts)}
+                  Last duel · {settingsLabel(h.last)}
                 </Text>
                 <Text wrap="truncate-end">
                   you {ordinal(h.last.myPlace)} · {name} {ordinal(h.last.theirPlace)}
+                  <Text color={theme.faint}> · {shortTime(h.last.ts)}</Text>
                 </Text>
               </>
             ) : null}
@@ -123,9 +124,9 @@ export function StatsPanel({ store, friend, width, compact }: { store: AppStore;
       <Title>Your stats</Title>
       <Text wrap="truncate-end">
         <Text bold>{stats.races}</Text>
-        <Text color={theme.dim}> races · </Text>
+        <Text color={theme.dim}> {stats.races === 1 ? 'race' : 'races'} · </Text>
         <Text bold>{stats.wins}</Text>
-        <Text color={theme.dim}> wins</Text>
+        <Text color={theme.dim}> {stats.wins === 1 ? 'win' : 'wins'}</Text>
         {stats.races ? <Text color={theme.dim}> ({pct(stats.winRate)})</Text> : null}
       </Text>
       <Text color={theme.dim} wrap="truncate-end">
@@ -133,7 +134,7 @@ export function StatsPanel({ store, friend, width, compact }: { store: AppStore;
       </Text>
       {compact ? (
         <Text color={theme.dim} wrap="truncate-end">
-          best {sprint ? `${Math.round(sprint.best.wpm)} wpm` : '–'} · /stats for more
+          best {stats.bestWpm ? `${Math.round(stats.bestWpm)} wpm` : '–'} · /stats for more
         </Text>
       ) : (
         <>
