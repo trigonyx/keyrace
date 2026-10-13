@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { GameManager, type PendingInvite, type Timing } from '../game/session.js';
+import { GameManager, type PendingInvite, type Tuning } from '../game/session.js';
 import { ResultsBook } from '../game/results.js';
 import { leaderboard, type LeaderRow, type RaceRecord, type Stats } from '../game/stats.js';
 import { ContactBook, displayName, type Contact } from './contacts.js';
@@ -28,8 +28,8 @@ export interface StoreOptions {
   debug?: boolean;
   /** Desktop notification sink (defaults to the OS notifier). */
   notify?: (title: string, body: string) => void;
-  /** Game timings (tests use short countdowns). */
-  timing?: Partial<Timing>;
+  /** Game timings and limits (tests use short countdowns and type instantly). */
+  tuning?: Partial<Tuning>;
 }
 
 export interface FriendView extends Contact {
@@ -68,6 +68,7 @@ export class AppStore {
   readonly network: Network;
   readonly games: GameManager;
   readonly results: ResultsBook;
+  readonly paths: Paths;
   private readonly peerBook: PeerBook;
   private readonly dialer: Dialer;
   private readonly toasts: Toasts;
@@ -88,6 +89,7 @@ export class AppStore {
   constructor(private readonly opts: StoreOptions) {
     const cfg = loadConfig(opts.paths);
     if (!cfg) throw new Error('No profile found');
+    this.paths = opts.paths;
     this.name = cfg.name;
     this.preferredPort = opts.port ?? cfg.port ?? DEFAULT_PORT;
     this.identity = loadOrCreateIdentity(opts.paths);
@@ -115,7 +117,7 @@ export class AppStore {
       notify: (title, body) => this.desktopNotify(title, body),
       save: (rec) => this.saveResult(rec),
       racingChanged: () => this.broadcastPresence(),
-      timing: opts.timing,
+      tuning: opts.tuning,
     });
     this.network.on('session', (s) => this.onSession(s));
     this.network.on('offline', (id) => this.onOffline(id));

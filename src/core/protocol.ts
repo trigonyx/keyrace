@@ -223,7 +223,7 @@ export function parseWire(buf: Buffer): Wire | null {
         const r = p as Record<string, unknown>;
         if (!isPeerId(r.id) || !isCount(r.place, MAX_PLAYERS) || (r.place as number) < 1) return null;
         if (!['finished', 'out', 'left'].includes(r.status as string)) return null;
-        if (!isNum(r.wpm, 1000) || !isNum(r.acc, 1) || !isCount(r.timeMs, MAX_TIME)) return null;
+        if (!isNum(r.wpm, MAX_COUNT) || !isNum(r.acc, 1) || !isCount(r.timeMs, MAX_TIME)) return null;
         if (![r.words, r.errors, r.chars].every((n) => isCount(n))) return null;
         players.push({
           id: r.id,

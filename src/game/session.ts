@@ -81,10 +81,10 @@ export interface GameDeps {
   /** we entered or left a race (presence for friends: "▶ racing") */
   racingChanged(racing: boolean): void;
   now?: () => number;
-  timing?: Partial<Timing>;
+  tuning?: Partial<Tuning>;
 }
 
-export interface Timing {
+export interface Tuning {
   /** 3 · 2 · 1 · GO */
   countdownMs: number;
   /** "everyone's here" notice before the automatic start */
@@ -95,9 +95,11 @@ export interface Timing {
   graceMs: number;
   /** how long a guest waits for the lobby after joining */
   joinTimeoutMs: number;
+  /** progress faster than this is ignored by the host */
+  maxWpm: number;
 }
 
-const DEFAULT_TIMING: Timing = { countdownMs: 3000, autoStartMs: 3000, tickMs: 250, graceMs: 2500, joinTimeoutMs: 6000 };
+const DEFAULT_TUNING: Tuning = { countdownMs: 3000, autoStartMs: 3000, tickMs: 250, graceMs: 2500, joinTimeoutMs: 6000, maxWpm: MAX_PLAUSIBLE_WPM };
 const MAX_CHAT_LINES = 50;
 
 /** Enough text that nobody runs out: 250 WPM for a sprint, 50 % spare words for a race. */
@@ -124,11 +126,11 @@ export class GameManager {
   private lastSent = '';
   private chatSeq = 0;
   private wasRacing = false;
-  private readonly t: Timing;
+  private readonly t: Tuning;
   private readonly now: () => number;
 
   constructor(private readonly deps: GameDeps) {
-    this.t = { ...DEFAULT_TIMING, ...deps.timing };
+    this.t = { ...DEFAULT_TUNING, ...deps.tuning };
     this.now = deps.now ?? Date.now;
   }
 
@@ -739,7 +741,18 @@ export class GameManager {
     // their clock and ours run at the same pace; the network adds a few ms at most
     const hostElapsed = this.now() - g.engine.startAt;
     const ms = Math.min(p.ms, Math.max(0, hostElapsed + 2000));
-    if (p.chars > 30 && wpmOf(p.chars, ms) > MAX_PLAUSIBLE_WPM) return;
+    if (p.chars > 30 && wpmOf(p.chars, ms) > this.t.maxWpm) {
+      // implausible: keep the last believable numbers – but a final report still ends their run,
+      // so nobody waits for the time limit
+      if (p.status !== 'racing') {
+        const last = prev ?? { chars: 0, words: 0, errors: 0, keys: 0, correctKeys: 0, idx: 0, status: 'racing' as const, ms: 0 };
+        r.progress = { ...last, status: p.status, ms };
+        delete r.progress.completed;
+        this.checkEnd();
+        this.deps.changed();
+      }
+      return;
+    }
     const completed = g.settings.mode === 'race' && claimed === true && p.words >= g.settings.param;
     r.progress = { ...p, status: p.status, ms, ...(completed ? { completed: true } : {}) };
     this.checkEnd();

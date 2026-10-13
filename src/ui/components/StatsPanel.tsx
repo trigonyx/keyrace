@@ -37,10 +37,17 @@ function Row({ label, value, width }: { label: string; value: string; width: num
   );
 }
 
-/** Rows the compact panel takes (below the list in narrow terminals), border included. */
-export function compactPanelHeight(store: AppStore, friend: FriendView | null): number {
-  if (!friend) return 6;
-  return store.stats().h2h.get(friend.id)?.last ? 6 : 4;
+/** Rows the panel takes, border included (for the layout math). */
+export function panelHeight(store: AppStore, friend: FriendView | null, compact: boolean): number {
+  if (friend) {
+    const h = store.stats().h2h.get(friend.id);
+    if (!h) return compact ? 4 : 5;
+    if (compact) return h.last ? 6 : 4;
+    return 2 + 1 + 1 + 1 + 1 + 2 + (h.last ? 3 : 0);
+  }
+  if (compact) return 6;
+  const leaders = Math.min(5, store.leaderboard().length);
+  return 10 + (leaders > 1 ? 2 + leaders : 0);
 }
 
 /**
@@ -57,9 +64,16 @@ export function StatsPanel({ store, friend, width, compact }: { store: AppStore;
       <Box flexDirection="column" borderStyle="round" borderColor={theme.border} paddingX={1} width={width} flexShrink={0}>
         <Title>{`You vs ${name}`}</Title>
         {!h ? (
-          <Text color={theme.dim} wrap={compact ? 'truncate-end' : 'wrap'}>
-            No races together yet. Press enter to invite {name}.
-          </Text>
+          <>
+            <Text color={theme.dim} wrap="truncate-end">
+              No races together yet.
+            </Text>
+            {!compact ? (
+              <Text color={theme.dim} wrap="truncate-end">
+                Press enter to invite {name}.
+              </Text>
+            ) : null}
+          </>
         ) : (
           <>
             <Text wrap="truncate-end">

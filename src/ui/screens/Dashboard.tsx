@@ -10,7 +10,7 @@ import { CommandMenu, menuHeight } from '../components/CommandMenu.js';
 import { Dialog, dialogHeight, type DialogSpec } from '../components/Dialog.js';
 import { Footer } from '../components/Footer.js';
 import { InputBox, inputBoxHeight } from '../components/InputBox.js';
-import { compactPanelHeight, StatsPanel } from '../components/StatsPanel.js';
+import { panelHeight, StatsPanel } from '../components/StatsPanel.js';
 import { cleanPaste, edit, emptyEditor, type EditorState } from '../editor.js';
 import { useWheel } from '../mouse.js';
 import { icons, theme } from '../theme.js';
@@ -68,7 +68,8 @@ export function Dashboard({ store, width, height, rows, actions, dialog, selecte
   };
   const entries: Entry[] = Object.values(sections).flat();
   let selected = entries.findIndex((e) => e.key === selectedKey);
-  if (selected === -1) selected = 0;
+  // nothing picked (yet, or it's gone): an open request first, so enter answers it – else the banner
+  if (selected === -1) selected = sections.requests.length ? 1 : 0;
   const current = entries[selected];
   const selectedFriend = current?.type === 'friend' && current.friend.state === 'accepted' ? current.friend : null;
 
@@ -109,7 +110,9 @@ export function Dashboard({ store, width, height, rows, actions, dialog, selecte
     if (e.type === 'request') {
       const r = e.request;
       if (r.kind === 'invite') return acceptInvite(r.invite);
-      return attempt(() => store.accept(r.friend.id));
+      const id = r.friend.id;
+      attempt(() => store.accept(id));
+      return onSelect(`f:${id}`);
     }
     if (e.type === 'nearby') return attempt(() => store.requestNearby(e.peer.id));
     const f = e.friend;
@@ -188,10 +191,14 @@ export function Dashboard({ store, width, height, rows, actions, dialog, selecte
   const banner = bannerHeight(compact);
   const bottom = dialog ? dialogHeight(dialog) : commandMode ? inputBoxHeight(editor, width) + menuHeight(cmd.items.length) : 0;
   const side = width >= SIDE_BY_SIDE;
-  const panelRows = side ? 0 : compactPanelHeight(store, selectedFriend);
   const mainHeight = Math.max(3, height - banner - bottom - 1);
+  // the full panel where it fits, else the compact one, else none (e.g. while a dialog is open)
+  const fullRows = panelHeight(store, selectedFriend, false);
+  const compactRows = panelHeight(store, selectedFriend, true);
+  const panelCompact = !side || mainHeight < fullRows;
+  const panelRows = panelCompact ? compactRows : fullRows;
   // stacked: the panel only shows if the list still gets a few rows
-  const showPanel = side || mainHeight - panelRows >= 4;
+  const showPanel = side ? mainHeight >= panelRows : mainHeight - panelRows >= 4;
   const listHeight = Math.max(2, mainHeight - (showPanel && !side ? panelRows : 0));
   const listWidth = side ? width - PANEL_WIDTH - 1 : width;
   const inner = listWidth - 2;
@@ -230,7 +237,7 @@ export function Dashboard({ store, width, height, rows, actions, dialog, selecte
   return (
     <Box flexDirection="column" width={width} height={height}>
       <Banner width={width} compact={compact} selected={current?.type === 'banner'} />
-      <Box flexDirection={side ? 'row' : 'column'} height={mainHeight} width={width} alignItems="flex-start">
+      <Box flexDirection={side ? 'row' : 'column'} height={mainHeight} width={width} alignItems="flex-start" overflow="hidden">
         <Box flexDirection="column" height={listHeight} width={listWidth} paddingX={1} overflow="hidden" flexShrink={0}>
           {visible.map((l, i) => {
             if (l.kind === 'gap') return <Text key={`g${i}`}> </Text>;
@@ -247,7 +254,7 @@ export function Dashboard({ store, width, height, rows, actions, dialog, selecte
         </Box>
         {showPanel ? (
           <Box marginLeft={side ? 1 : 0} flexShrink={0}>
-            <StatsPanel store={store} friend={selectedFriend} width={side ? PANEL_WIDTH : width} compact={!side} />
+            <StatsPanel store={store} friend={selectedFriend} width={side ? PANEL_WIDTH : width} compact={panelCompact} />
           </Box>
         ) : null}
       </Box>
