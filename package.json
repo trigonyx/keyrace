@@ -1,6 +1,6 @@
 {
   "name": "keyrace",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "description": "Multiplayer typing races for your local network, right in the terminal.",
   "repository": {
     "type": "git",
