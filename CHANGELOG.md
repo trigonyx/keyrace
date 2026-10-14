@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.0.0 – 2026-10-14
+
+- Shared core termcore and one profile for termchat, keyrace and termdrop
+
 ## 1.1.0 – 2026-10-14
 
 - One keyrace per data folder
