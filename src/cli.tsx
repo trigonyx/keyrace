@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { render } from 'ink';
 import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -16,6 +17,7 @@ import {
   staleInstallHint,
 } from './core/update.js';
 import { REPO_CONFIGURED, VERSION } from './core/version.js';
+import { acquireLock, startInstanceServer, type Lock } from './core/instance.js';
 import { Root } from './ui/App.js';
 import { MOUSE_OFF, MOUSE_ON, MouseFilterStdin } from './ui/mouse.js';
 
@@ -67,7 +69,7 @@ async function update(): Promise<number> {
   return 1;
 }
 
-function main(): void {
+async function main(): Promise<void> {
   let values;
   let positionals: string[];
   try {
@@ -120,11 +122,32 @@ function main(): void {
 
   const paths = resolvePaths(values.home);
 
+  // one keyrace per data folder
+  let lock: Lock;
+  try {
+    const got = await acquireLock(paths.lock, paths.socket);
+    if (!('release' in got)) {
+      process.stdout.write('keyrace is already open in another window.\n');
+      process.exit(0);
+    }
+    lock = got;
+  } catch (err) {
+    process.stderr.write(`Couldn't start keyrace: ${(err as Error).message}\n`);
+    process.exit(1);
+  }
+  try {
+    await startInstanceServer(paths.socket);
+  } catch {
+    // a second start can't probe us then – the lock alone still keeps it out
+  }
+
   // full screen like vim/less – on exit the terminal is back to how it was
   let restored = false;
   const restore = () => {
     if (restored) return;
     restored = true;
+    lock.release();
+    if (process.platform !== 'win32') fs.rmSync(paths.socket, { force: true });
     process.stdout.write(MOUSE_OFF + SHOW_CURSOR + ALT_SCREEN_OFF);
   };
   // alternate scroll + focus reports: trackpad/wheel move lists, focus drives notifications
@@ -173,7 +196,7 @@ async function start(): Promise<void> {
       process.stderr.write(`Couldn't start keyrace ${local.version} (${(err as Error).message}) – starting ${VERSION} instead.\n`);
     }
   }
-  main();
+  await main();
 }
 
 void start();
