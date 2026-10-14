@@ -1,14 +1,23 @@
 #!/usr/bin/env node
 
 // src/cli.tsx
+import fs5 from "fs";
 import { render } from "ink";
 import { spawn as spawn2 } from "child_process";
 import { fileURLToPath, pathToFileURL } from "url";
 import { parseArgs } from "util";
 
 // src/core/paths.ts
+import crypto from "crypto";
 import os from "os";
 import path from "path";
+var MAX_SOCKET_PATH = 100;
+function socketPath(root, platform = process.platform) {
+  const tag = crypto.createHash("sha256").update(root).digest("hex").slice(0, 12);
+  if (platform === "win32") return `\\\\.\\pipe\\keyrace-${tag}`;
+  const inHome = path.join(root, "keyrace.sock");
+  return Buffer.byteLength(inHome) <= MAX_SOCKET_PATH ? inHome : path.join(os.tmpdir(), `keyrace-${tag}.sock`);
+}
 function resolvePaths(home) {
   const root = path.resolve(home ?? process.env.KEYRACE_HOME ?? path.join(os.homedir(), ".keyrace"));
   return {
@@ -18,7 +27,9 @@ function resolvePaths(home) {
     contacts: path.join(root, "contacts.json"),
     peers: path.join(root, "peers.json"),
     results: path.join(root, "results.jsonl"),
-    log: path.join(root, "keyrace.log")
+    log: path.join(root, "keyrace.log"),
+    lock: path.join(root, "keyrace.lock"),
+    socket: socketPath(root)
   };
 }
 
@@ -31,7 +42,7 @@ import path2 from "path";
 // package.json
 var package_default = {
   name: "keyrace",
-  version: "1.0.0",
+  version: "1.1.0",
   description: "Multiplayer typing races for your local network, right in the terminal.",
   repository: {
     type: "git",
@@ -228,12 +239,10 @@ var restart = false;
 var requestRestart = () => void (restart = true);
 var restartRequested = () => restart;
 
-// src/ui/App.tsx
-import { Box as Box17, Text as Text17, useApp, useInput as useInput9 } from "ink";
-import { useCallback, useEffect as useEffect6, useMemo, useRef as useRef5, useState as useState8 } from "react";
-
-// src/commands/builtin.ts
-import net2 from "net";
+// src/core/instance.ts
+import fs3 from "fs";
+import net from "net";
+import path4 from "path";
 
 // src/core/storage.ts
 import fs2 from "fs";
@@ -285,6 +294,89 @@ function ensureDir(dir) {
   fs2.mkdirSync(dir, { recursive: true, mode: 448 });
 }
 
+// src/core/instance.ts
+var STARTUP_GRACE = 1e4;
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === "EPERM";
+  }
+}
+function probeSocket(socket, timeoutMs = 1e3) {
+  return new Promise((resolve) => {
+    const c2 = net.connect(socket);
+    const done2 = (ok) => {
+      clearTimeout(timer);
+      c2.destroy();
+      resolve(ok);
+    };
+    const timer = setTimeout(() => done2(false), timeoutMs);
+    c2.once("connect", () => done2(true));
+    c2.once("error", () => done2(false));
+  });
+}
+function readLock(file) {
+  try {
+    const o = JSON.parse(fs3.readFileSync(file, "utf8"));
+    return Number.isInteger(o?.pid) && typeof o.startedAt === "number" && typeof o.socket === "string" ? o : null;
+  } catch {
+    return null;
+  }
+}
+async function acquireLock(lockFile, socket, opts = {}) {
+  const isAlive = opts.isAlive ?? pidAlive;
+  const probe = opts.probe ?? probeSocket;
+  const now = opts.now ?? Date.now;
+  ensureDir(path4.dirname(lockFile));
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const info = { pid: process.pid, startedAt: now(), socket };
+    try {
+      fs3.writeFileSync(lockFile, JSON.stringify(info), { flag: "wx", mode: 384 });
+      return {
+        release: () => {
+          if (readLock(lockFile)?.pid === process.pid) fs3.rmSync(lockFile, { force: true });
+        }
+      };
+    } catch (err) {
+      if (err.code !== "EEXIST") throw err;
+    }
+    const holder = readLock(lockFile);
+    const stale = !holder || holder.pid === process.pid || !isAlive(holder.pid) || !await probe(holder.socket) && now() - holder.startedAt > STARTUP_GRACE;
+    if (!stale) return { holder };
+    fs3.rmSync(lockFile, { force: true });
+  }
+  throw new Error(`Couldn't take the lock ${lockFile}`);
+}
+async function startInstanceServer(socket) {
+  if (process.platform !== "win32") fs3.rmSync(socket, { force: true });
+  const server = net.createServer((conn) => {
+    conn.on("error", () => {
+    });
+    conn.end();
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socket, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  if (process.platform !== "win32") fs3.chmodSync(socket, 384);
+  server.on("error", () => {
+  });
+  server.unref();
+  return server;
+}
+
+// src/ui/App.tsx
+import { Box as Box17, Text as Text17, useApp, useInput as useInput9 } from "ink";
+import { useCallback, useEffect as useEffect6, useMemo, useRef as useRef5, useState as useState8 } from "react";
+
+// src/commands/builtin.ts
+import net3 from "net";
+
 // src/core/contacts.ts
 function displayName(c2) {
   return c2.alias || c2.name;
@@ -323,7 +415,7 @@ var ContactBook = class {
 };
 
 // src/core/identity.ts
-import crypto from "crypto";
+import crypto2 from "crypto";
 var BASE32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 function base32(buf) {
   let bits = 0;
@@ -341,7 +433,7 @@ function base32(buf) {
   return out;
 }
 function fingerprint(publicRaw) {
-  return base32(crypto.createHash("sha256").update(publicRaw).digest()).slice(0, 20);
+  return base32(crypto2.createHash("sha256").update(publicRaw).digest()).slice(0, 20);
 }
 function formatId(id, full = false) {
   const groups = (full ? id : id.slice(0, 8)).match(/.{1,4}/g) ?? [];
@@ -349,17 +441,17 @@ function formatId(id, full = false) {
 }
 function safetyCode(a, b) {
   const [first, second] = Buffer.compare(a, b) <= 0 ? [a, b] : [b, a];
-  const digest = crypto.createHash("sha256").update(first).update(second).digest();
+  const digest = crypto2.createHash("sha256").update(first).update(second).digest();
   const groups = [];
   for (let i = 0; i < 6; i++) groups.push(String(digest.readUInt32BE(i * 4) % 1e5).padStart(5, "0"));
   return groups.join(" ");
 }
 function publicKeyFromRaw(raw) {
-  return crypto.createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: raw.toString("base64url") }, format: "jwk" });
+  return crypto2.createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: raw.toString("base64url") }, format: "jwk" });
 }
 function fromFile(file) {
   const publicRaw = Buffer.from(file.publicKey, "base64url");
-  const privateKey = crypto.createPrivateKey({
+  const privateKey = crypto2.createPrivateKey({
     key: { kty: "OKP", crv: "Ed25519", x: file.publicKey, d: file.privateKey },
     format: "jwk"
   });
@@ -368,7 +460,7 @@ function fromFile(file) {
 function loadOrCreateIdentity(paths) {
   const existing = readJson(paths.identity, null);
   if (existing?.v === 1 && existing.publicKey && existing.privateKey) return fromFile(existing);
-  const { privateKey } = crypto.generateKeyPairSync("ed25519");
+  const { privateKey } = crypto2.generateKeyPairSync("ed25519");
   const jwk = privateKey.export({ format: "jwk" });
   const file = { v: 1, publicKey: jwk.x, privateKey: jwk.d };
   writeJsonAtomic(paths.identity, file);
@@ -383,7 +475,7 @@ function saveConfig(paths, cfg) {
 }
 
 // src/core/network.ts
-import net from "net";
+import net2 from "net";
 import { EventEmitter as EventEmitter3 } from "events";
 
 // src/core/framing.ts
@@ -513,10 +605,10 @@ var FrameSocket = class extends EventEmitter {
 };
 
 // src/core/handshake.ts
-import crypto3 from "crypto";
+import crypto4 from "crypto";
 
 // src/core/channel.ts
-import crypto2 from "crypto";
+import crypto3 from "crypto";
 var TAG_LEN = 16;
 var CipherState = class {
   constructor(key) {
@@ -531,14 +623,14 @@ var CipherState = class {
     return nonce;
   }
   encrypt(plain) {
-    const cipher = crypto2.createCipheriv("chacha20-poly1305", this.key, this.nextNonce(), { authTagLength: TAG_LEN });
+    const cipher = crypto3.createCipheriv("chacha20-poly1305", this.key, this.nextNonce(), { authTagLength: TAG_LEN });
     const body = Buffer.concat([cipher.update(plain), cipher.final()]);
     return Buffer.concat([body, cipher.getAuthTag()]);
   }
   /** Throws if the frame is not authentic. */
   decrypt(frame) {
     if (frame.length < TAG_LEN) throw new Error("Frame too short");
-    const decipher = crypto2.createDecipheriv("chacha20-poly1305", this.key, this.nextNonce(), {
+    const decipher = crypto3.createDecipheriv("chacha20-poly1305", this.key, this.nextNonce(), {
       authTagLength: TAG_LEN
     });
     decipher.setAuthTag(frame.subarray(frame.length - TAG_LEN));
@@ -584,39 +676,39 @@ function parseHello(frame) {
 function authPayload(role, transcript) {
   return Buffer.concat([Buffer.from(`${PROTOCOL} auth ${role}`), transcript]);
 }
-async function performHandshake(fs4, me, myName, initiator, timeoutMs = HANDSHAKE_TIMEOUT) {
-  const { privateKey: ephPriv, publicKey: ephPub } = crypto3.generateKeyPairSync("x25519");
+async function performHandshake(fs6, me, myName, initiator, timeoutMs = HANDSHAKE_TIMEOUT) {
+  const { privateKey: ephPriv, publicKey: ephPub } = crypto4.generateKeyPairSync("x25519");
   const ephRaw = Buffer.from(ephPub.export({ format: "jwk" }).x, "base64url");
-  const nonce = crypto3.randomBytes(16);
-  fs4.send(
+  const nonce = crypto4.randomBytes(16);
+  fs6.send(
     Buffer.from(
       JSON.stringify({ t: "hello", p: PROTOCOL, eph: ephRaw.toString("base64url"), nonce: nonce.toString("base64url") })
     )
   );
-  const peer = parseHello(await fs4.read(timeoutMs));
+  const peer = parseHello(await fs6.read(timeoutMs));
   if (peer.eph.equals(ephRaw)) throw new HandshakeError("Reflected handshake");
   const [i, r] = initiator ? [{ eph: ephRaw, nonce }, peer] : [peer, { eph: ephRaw, nonce }];
-  const transcript = crypto3.createHash("sha256").update(PROTOCOL).update(i.eph).update(i.nonce).update(r.eph).update(r.nonce).digest();
+  const transcript = crypto4.createHash("sha256").update(PROTOCOL).update(i.eph).update(i.nonce).update(r.eph).update(r.nonce).digest();
   let shared;
   try {
-    const peerEphKey = crypto3.createPublicKey({
+    const peerEphKey = crypto4.createPublicKey({
       key: { kty: "OKP", crv: "X25519", x: peer.eph.toString("base64url") },
       format: "jwk"
     });
-    shared = crypto3.diffieHellman({ privateKey: ephPriv, publicKey: peerEphKey });
+    shared = crypto4.diffieHellman({ privateKey: ephPriv, publicKey: peerEphKey });
   } catch {
     throw new HandshakeError("Invalid key");
   }
   if (shared.every((b) => b === 0)) throw new HandshakeError("Invalid key");
-  const okm = Buffer.from(crypto3.hkdfSync("sha256", shared, transcript, `${PROTOCOL} keys`, 64));
+  const okm = Buffer.from(crypto4.hkdfSync("sha256", shared, transcript, `${PROTOCOL} keys`, 64));
   const i2r = okm.subarray(0, 32);
   const r2i = okm.subarray(32, 64);
   const send = new CipherState(initiator ? i2r : r2i);
   const recv = new CipherState(initiator ? r2i : i2r);
   const myRole = initiator ? "I" : "R";
   const peerRole = initiator ? "R" : "I";
-  const sig = crypto3.sign(null, authPayload(myRole, transcript), me.privateKey);
-  fs4.send(
+  const sig = crypto4.sign(null, authPayload(myRole, transcript), me.privateKey);
+  fs6.send(
     send.encrypt(
       Buffer.from(
         JSON.stringify({ pub: me.publicRaw.toString("base64url"), name: myName, sig: sig.toString("base64url") })
@@ -625,7 +717,7 @@ async function performHandshake(fs4, me, myName, initiator, timeoutMs = HANDSHAK
   );
   let auth;
   try {
-    auth = JSON.parse(recv.decrypt(await fs4.read(timeoutMs)).toString("utf8"));
+    auth = JSON.parse(recv.decrypt(await fs6.read(timeoutMs)).toString("utf8"));
   } catch (err) {
     if (err instanceof Error && /timed out|closed/.test(err.message)) throw err;
     throw new HandshakeError("Authentication failed");
@@ -637,7 +729,7 @@ async function performHandshake(fs4, me, myName, initiator, timeoutMs = HANDSHAK
   if (peerPublicRaw.length !== 32) throw new HandshakeError("Invalid identity key");
   let valid = false;
   try {
-    valid = crypto3.verify(
+    valid = crypto4.verify(
       null,
       authPayload(peerRole, transcript),
       publicKeyFromRaw(peerPublicRaw),
@@ -899,17 +991,17 @@ var IDLE_TIMEOUT = 45e3;
 var RATE_WINDOW = 1e3;
 var RATE_MAX = 200;
 var Session = class extends EventEmitter2 {
-  constructor(fs4, hs, initiator, tag) {
+  constructor(fs6, hs, initiator, tag) {
     super();
-    this.fs = fs4;
+    this.fs = fs6;
     this.hs = hs;
     this.initiator = initiator;
     this.tag = tag;
     this.peerId = hs.peerId;
     this.peerPublicRaw = hs.peerPublicRaw;
     this.peerName = hs.peerName;
-    fs4.on("frame", (frame) => this.onFrame(frame));
-    fs4.on("close", (err) => this.finish(err ? err.message : "Connection closed"));
+    fs6.on("frame", (frame) => this.onFrame(frame));
+    fs6.on("close", (err) => this.finish(err ? err.message : "Connection closed"));
     this.timer = setInterval(() => this.tick(), PING_INTERVAL / 3);
     this.timer.unref();
   }
@@ -1009,7 +1101,7 @@ var Network = class extends EventEmitter3 {
   /** Listens on the preferred port, or on a free one if it's taken. */
   async start(preferredPort = DEFAULT_PORT) {
     const tryListen = (port) => new Promise((resolve, reject) => {
-      const server = net.createServer((socket) => this.onIncoming(socket));
+      const server = net2.createServer((socket) => this.onIncoming(socket));
       server.once("error", reject);
       server.listen(port, "0.0.0.0", () => {
         server.off("error", reject);
@@ -1039,7 +1131,7 @@ var Network = class extends EventEmitter3 {
    */
   async dial(host, port, expectedId, tag) {
     const socket = await new Promise((resolve, reject) => {
-      const s = net.connect({ host, port });
+      const s = net2.connect({ host, port });
       const timer = setTimeout(() => {
         s.destroy();
         reject(new Error("Connection timed out"));
@@ -1054,15 +1146,15 @@ var Network = class extends EventEmitter3 {
         reject(err);
       });
     });
-    const fs4 = new FrameSocket(socket);
+    const fs6 = new FrameSocket(socket);
     try {
-      const hs = await performHandshake(fs4, this.me, this.getName(), true);
+      const hs = await performHandshake(fs6, this.me, this.getName(), true);
       if (expectedId && hs.peerId !== expectedId) {
         throw new HandshakeError("Someone else is now reachable at this address");
       }
-      return this.register(new Session(fs4, hs, true, tag));
+      return this.register(new Session(fs6, hs, true, tag));
     } catch (err) {
-      fs4.destroy();
+      fs6.destroy();
       throw err;
     }
   }
@@ -1072,13 +1164,13 @@ var Network = class extends EventEmitter3 {
       return;
     }
     this.pendingHandshakes++;
-    const fs4 = new FrameSocket(socket);
+    const fs6 = new FrameSocket(socket);
     try {
-      const hs = await performHandshake(fs4, this.me, this.getName(), false);
-      this.register(new Session(fs4, hs, false));
+      const hs = await performHandshake(fs6, this.me, this.getName(), false);
+      this.register(new Session(fs6, hs, false));
     } catch (err) {
-      this.emit("log", `Rejected incoming connection from ${fs4.remoteAddress}: ${err.message}`);
-      fs4.destroy();
+      this.emit("log", `Rejected incoming connection from ${fs6.remoteAddress}: ${err.message}`);
+      fs6.destroy();
     } finally {
       this.pendingHandshakes--;
     }
@@ -1339,7 +1431,7 @@ function parseAddress(input) {
   const host = m[1];
   const port = m[2] ? Number(m[2]) : DEFAULT_PORT;
   if (port < 1 || port > 65535) throw new Error(`Invalid port: ${m[2]}`);
-  if (!net2.isIP(host) && !/^[a-z0-9.-]+$/i.test(host)) throw new Error(`Invalid address: ${input}`);
+  if (!net3.isIP(host) && !/^[a-z0-9.-]+$/i.test(host)) throw new Error(`Invalid address: ${input}`);
   return { host, port };
 }
 function bestLines(ctx) {
@@ -1589,10 +1681,10 @@ ${tail}`);
 var registry = new CommandRegistry(builtinCommands);
 
 // src/core/store.ts
-import fs3 from "fs";
+import fs4 from "fs";
 
 // src/game/session.ts
-import crypto4 from "crypto";
+import crypto5 from "crypto";
 
 // src/game/engine.ts
 var MAX_EXTRA = 8;
@@ -2921,7 +3013,7 @@ function wordCount(s) {
   if (s.mode === "race") return Math.ceil(s.param * 1.5) + 20;
   return 600;
 }
-var newGid = () => crypto4.randomBytes(9).toString("base64url");
+var newGid = () => crypto5.randomBytes(9).toString("base64url");
 var GameManager = class {
   constructor(deps) {
     this.deps = deps;
@@ -3715,14 +3807,14 @@ function* scanOrder(ifaces) {
     if (prefix > 30 || i.address.startsWith("169.254.")) return [];
     const mask = prefix < MIN_SCAN_PREFIX ? 4294901760 : toInt(i.netmask);
     const ip = toInt(i.address);
-    const net3 = (ip & mask) >>> 0;
-    const broadcast = (net3 | ~mask >>> 0) >>> 0;
-    return [{ ip, net: net3, broadcast }];
+    const net4 = (ip & mask) >>> 0;
+    const broadcast = (net4 | ~mask >>> 0) >>> 0;
+    return [{ ip, net: net4, broadcast }];
   });
-  const gens = ranges.map(function* ({ ip, net: net3, broadcast }) {
-    for (let d = 1; ip + d < broadcast || ip - d > net3; d++) {
+  const gens = ranges.map(function* ({ ip, net: net4, broadcast }) {
+    for (let d = 1; ip + d < broadcast || ip - d > net4; d++) {
       if (ip + d < broadcast) yield toIp(ip + d);
-      if (ip - d > net3) yield toIp(ip - d);
+      if (ip - d > net4) yield toIp(ip - d);
     }
   });
   const seen = /* @__PURE__ */ new Set();
@@ -4197,7 +4289,7 @@ var AppStore = class {
   log(line) {
     if (!this.opts.debug) return;
     try {
-      fs3.appendFileSync(this.opts.paths.log, `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
+      fs4.appendFileSync(this.opts.paths.log, `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
 `);
     } catch {
     }
@@ -6697,7 +6789,7 @@ Update failed. ${installHint(res.output) ?? "See the npm output above."}
 `);
   return 1;
 }
-function main() {
+async function main() {
   let values;
   let positionals;
   try {
@@ -6752,10 +6844,29 @@ ${HELP}`);
     process.exit(1);
   }
   const paths = resolvePaths(values.home);
+  let lock;
+  try {
+    const got = await acquireLock(paths.lock, paths.socket);
+    if (!("release" in got)) {
+      process.stdout.write("keyrace is already open in another window.\n");
+      process.exit(0);
+    }
+    lock = got;
+  } catch (err) {
+    process.stderr.write(`Couldn't start keyrace: ${err.message}
+`);
+    process.exit(1);
+  }
+  try {
+    await startInstanceServer(paths.socket);
+  } catch {
+  }
   let restored = false;
   const restore = () => {
     if (restored) return;
     restored = true;
+    lock.release();
+    if (process.platform !== "win32") fs5.rmSync(paths.socket, { force: true });
     process.stdout.write(MOUSE_OFF + SHOW_CURSOR + ALT_SCREEN_OFF);
   };
   process.stdout.write(ALT_SCREEN_ON + MOUSE_ON);
@@ -6798,6 +6909,6 @@ async function start2() {
 `);
     }
   }
-  main();
+  await main();
 }
 void start2();
