@@ -1,19 +1,20 @@
 import { Box, Text, useInput } from 'ink';
 import { useEffect, useRef, useState } from 'react';
-import type { DiscoveredPeer } from '../../core/discovery.js';
+import type { DiscoveredPeer } from 'termcore/net/discovery';
 import type { AppStore, FriendView, RequestEntry } from '../../core/store.js';
 import type { PendingInvite } from '../../game/session.js';
 import { settingsPhrase } from '../../game/types.js';
 import type { Actions } from '../actions.js';
 import { Banner, bannerCompact, bannerHeight } from '../components/Banner.js';
-import { CommandMenu, menuHeight } from '../components/CommandMenu.js';
-import { Dialog, dialogHeight, type DialogSpec } from '../components/Dialog.js';
-import { Footer } from '../components/Footer.js';
-import { InputBox, inputBoxHeight } from '../components/InputBox.js';
+import { CommandMenu, menuHeight } from 'termcore/ui/components/CommandMenu';
+import { Dialog, dialogHeight, type DialogSpec } from 'termcore/ui/components/Dialog';
+import { Footer } from 'termcore/ui/components/Footer';
+import { InputBox, inputBoxHeight } from 'termcore/ui/components/InputBox';
 import { panelHeight, StatsPanel } from '../components/StatsPanel.js';
-import { cleanPaste, edit, emptyEditor, type EditorState } from '../editor.js';
-import { useWheel } from '../mouse.js';
-import { icons, theme } from '../theme.js';
+import { cleanPaste, edit, emptyEditor, type EditorState } from 'termcore/ui/editor';
+import { useWheel } from 'termcore/ui/mouse';
+import { icons, theme, personHex } from 'termcore/ui/theme';
+import { presenceDot, statusText } from 'termcore/ui/presence';
 import { useCommandInput } from './useCommandInput.js';
 
 type Entry =
@@ -48,11 +49,14 @@ function friendStatus(f: FriendView): { icon: string; color: string; text: strin
       return { icon: icons.error, color: theme.faint, text: 'declined your request' };
     case 'blocked':
       return { icon: icons.error, color: theme.error, text: 'blocked' };
-    default:
-      if (f.racing) return { icon: icons.racing, color: theme.accent, text: 'racing' };
-      if (f.away) return { icon: icons.away, color: theme.warning, text: 'away' };
-      if (f.online) return { icon: icons.online, color: theme.success, text: 'online' };
-      return { icon: icons.offline, color: theme.faint, text: 'offline' };
+    default: {
+      if (!f.online) return { icon: icons.offline, color: theme.faint, text: 'offline' };
+      // their status (busy, do not disturb, a message) comes with their presence
+      const status = statusText(f.status, f.statusMsg);
+      if (f.racing) return { icon: icons.racing, color: theme.accent, text: ['racing', status].filter(Boolean).join(' · ') };
+      if (f.status !== 'available') return { ...presenceDot(f), text: status };
+      return { ...presenceDot(f), text: [f.away ? 'away' : 'online', status].filter(Boolean).join(' · ') };
+    }
   }
 }
 
@@ -80,7 +84,8 @@ export function Dashboard({ store, width, height, rows, actions, dialog, selecte
   const newestKey = newestInvite?.kind === 'invite' ? `i:${newestInvite.invite.gid}` : null;
   const seenInvite = useRef<string | null>(null);
   useEffect(() => {
-    if (newestKey && newestKey !== seenInvite.current && !dialog) onSelect(newestKey);
+    // do not disturb: the invite waits under Requests without grabbing the selection
+    if (newestKey && newestKey !== seenInvite.current && !dialog && !store.dnd) onSelect(newestKey);
     seenInvite.current = newestKey;
   }, [newestKey]);
 
@@ -256,6 +261,7 @@ export function Dashboard({ store, width, height, rows, actions, dialog, selecte
         compact={compact}
         selected={current?.type === 'banner' ? (bannerSolo ? 'solo' : 'race') : null}
         animate={store.isFocused && !dialog && !commandMode}
+        mode={store.settings.animations}
       />
       <Box flexDirection={side ? 'row' : 'column'} height={mainHeight} width={width} alignItems="flex-start" overflow="hidden">
         <Box flexDirection="column" height={listHeight} width={listWidth} paddingX={1} overflow="hidden" flexShrink={0}>
@@ -311,9 +317,9 @@ function Pointer({ selected }: { selected: boolean }) {
 
 function Row({ entry, selected, width, store }: { entry: Entry; selected: boolean; width: number; store: AppStore }) {
   const nameWidth = Math.min(20, Math.max(10, Math.floor(width * 0.3)));
-  const name = (text: string) => (
+  const name = (text: string, color?: string) => (
     <Box width={nameWidth} flexShrink={0}>
-      <Text bold={selected} color={selected ? theme.accent : undefined} wrap="truncate-end">
+      <Text bold={selected} color={selected ? theme.accent : color} wrap="truncate-end">
         {text}
       </Text>
     </Box>
@@ -358,7 +364,7 @@ function Row({ entry, selected, width, store }: { entry: Entry; selected: boolea
     <Box>
       <Pointer selected={selected} />
       {dot(st.icon, st.color)}
-      {name(f.display)}
+      {name(f.display, f.state === 'accepted' ? personHex(f.id, f.color) : undefined)}
       <Box flexGrow={1} flexShrink={1} minWidth={0}>
         <Text color={f.state === 'accepted' && f.online ? st.color : theme.dim} italic={f.state !== 'accepted'} wrap="truncate-end">
           {st.text}

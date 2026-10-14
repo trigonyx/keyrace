@@ -1,21 +1,23 @@
-import fs from 'node:fs';
-import { GameManager, type PendingInvite, type Tuning } from '../game/session.js';
+import { Toasts, type NoteKind, type Toast } from 'termcore/app/toasts';
+import { displayName, type ContactOf } from 'termcore/friends/book';
+import { appendLog, FriendNet, type FriendEvent } from 'termcore/friends/net';
+import type { Status } from 'termcore/friends/profile';
+import type { ContactState } from 'termcore/friends/state';
+import type { DiscoveredPeer, DiscoveryOptions } from 'termcore/net/discovery';
+import type { Settings } from 'termcore/store/files';
+import { Hub } from 'termcore/store/hub';
+import { setAccent, setPersonColors } from 'termcore/ui/theme';
+import { APP } from '../app.js';
 import { ResultsBook } from '../game/results.js';
+import { GameManager, type PendingInvite, type Tuning } from '../game/session.js';
 import { leaderboard, type LeaderRow, type RaceRecord, type Stats } from '../game/stats.js';
-import { ContactBook, displayName, type Contact } from './contacts.js';
-import { Dialer } from './dialer.js';
-import { Discovery, localIPv4s, type DiscoveredPeer, type DiscoveryOptions } from './discovery.js';
-import { loadConfig, loadOrCreateIdentity, safetyCode, saveConfig, type Identity } from './identity.js';
-import { DEFAULT_PORT, Network } from './network.js';
-import { notify } from './notify.js';
+import { readConfig } from './config.js';
 import type { Paths } from './paths.js';
-import type { Session } from './peer.js';
-import { PeerBook } from './peers.js';
-import { reconcile, relStateFor, type ContactState, type Wire } from './protocol.js';
-import { cleanName } from './sanitize.js';
-import { Toasts, type NoteKind, type Toast } from './toasts.js';
+import { WIRE, type GameWire } from './protocol.js';
 
 export type { NoteKind, Toast };
+
+export type Contact = ContactOf<object>;
 
 export interface StoreOptions {
   paths: Paths;
@@ -39,6 +41,9 @@ export interface FriendView extends Contact {
   away: boolean;
   /** in a countdown or race right now */
   racing: boolean;
+  /** their status (only while connected) */
+  status: Status;
+  statusMsg?: string;
 }
 
 export type RequestEntry = { kind: 'friend'; friend: FriendView } | { kind: 'invite'; invite: PendingInvite };
@@ -52,119 +57,109 @@ export interface DashboardData {
   nearby: DiscoveredPeer[];
 }
 
-/** Unknown connections that don't introduce themselves are dropped after this time. */
-const UNKNOWN_PEER_TIMEOUT = 15_000;
-
 const FRIEND_ORDER: Record<ContactState, number> = { accepted: 0, outgoing: 1, declined: 2, incoming: 3, blocked: 4 };
 
 /**
- * Central app logic: friends, presence and the network, plus the game manager. Exposes a
- * subscribable state to the UI and also runs without a UI (tests). Auto-connecting lives in
- * dialer.ts, everything about races in game/session.ts.
+ * Central app logic: friends (termcore's FriendNet on the shared ~/.termhub) plus the game
+ * manager. Exposes a subscribable state to the UI and also runs without a UI (tests).
+ * Everything about races lives in game/session.ts.
  */
 export class AppStore {
-  readonly identity: Identity;
-  readonly contacts: ContactBook;
-  readonly network: Network;
+  readonly net: FriendNet<GameWire>;
+  readonly hub: Hub;
   readonly games: GameManager;
   readonly results: ResultsBook;
   readonly paths: Paths;
-  private readonly peerBook: PeerBook;
-  private readonly dialer: Dialer;
   private readonly toasts: Toasts;
-  private discovery: Discovery | null = null;
-  private name: string;
-  private readonly preferredPort: number;
   private listeners = new Set<() => void>();
   private notifyQueued = false;
-  private focused = true;
-  /** Peers that reported their terminal is in the background … */
-  private away = new Set<string>();
-  /** … or that they're racing. */
-  private racingPeers = new Set<string>();
   version = 0;
   /** Newer version on GitHub (checked by the UI at launch), shown in the header. */
   updateAvailable: string | null = null;
 
   constructor(private readonly opts: StoreOptions) {
-    const cfg = loadConfig(opts.paths);
-    if (!cfg) throw new Error('No profile found');
     this.paths = opts.paths;
-    this.name = cfg.name;
-    this.preferredPort = opts.port ?? cfg.port ?? DEFAULT_PORT;
-    this.identity = loadOrCreateIdentity(opts.paths);
-    this.contacts = new ContactBook(opts.paths);
-    this.network = new Network(this.identity, () => this.name);
-    this.peerBook = new PeerBook(opts.paths);
+    this.hub = new Hub(opts.paths.hub);
     this.results = new ResultsBook(opts.paths);
     this.toasts = new Toasts(() => this.changed());
-    this.dialer = new Dialer({
-      myId: this.identity.id,
-      network: this.network,
-      contacts: this.contacts,
-      discovery: () => this.discovery,
-      log: (l) => this.log(l),
-      unreachable: (_id, text) => this.showToast(text, 'error'),
+    this.net = new FriendNet<GameWire>({
+      app: APP,
+      paths: opts.paths,
+      hub: this.hub,
+      port: opts.port ?? readConfig(opts.paths).port,
+      discovery: opts.discovery,
+      discoveryPort: opts.discoveryPort,
+      discoveryOptions: opts.discoveryOptions,
+      dialIntervalMs: opts.dialIntervalMs,
+      notify: opts.notify,
+      wire: WIRE,
+      hooks: {
+        changed: () => this.changed(),
+        log: (l) => this.log(l),
+        event: (e) => this.onEvent(e),
+        message: (s, m) => this.games.onWire(s.peerId, m),
+        offline: (id) => this.games.onPeerOffline(id),
+        presenceExtra: () => (this.games.racing ? { racing: true } : {}),
+        knowsId: (id) => this.results.knows(id),
+        rekey: (oldId, newId) => this.results.rekey(oldId, newId),
+        settings: (s) => this.applySettings(s),
+      },
     });
+    this.applySettings(this.hub.settings.get());
+    // names in friends' profile colors wherever the UI colors people
+    setPersonColors((id) => this.contacts.get(id)?.color);
     this.games = new GameManager({
-      me: () => ({ id: this.identity.id, name: this.name }),
-      send: (id, msg) => this.network.get(id)?.send(msg) ?? false,
-      isOnline: (id) => this.network.isOnline(id),
+      me: () => ({ id: this.identity.id, name: this.net.name }),
+      send: (id, msg) => this.net.send(id, msg),
+      isOnline: (id) => this.net.isOnline(id),
       isFriend: (id) => this.contacts.get(id)?.state === 'accepted',
       nameOf: (id) => this.peerName(id),
       changed: () => this.changed(),
       toast: (text, kind) => this.showToast(text, kind),
-      notify: (title, body) => this.desktopNotify(title, body),
+      notify: (title, body) => this.net.notify(title, body),
+      quiet: () => this.net.dnd,
       save: (rec) => this.saveResult(rec),
-      racingChanged: () => this.broadcastPresence(),
+      racingChanged: () => this.net.broadcastPresence(),
       tuning: opts.tuning,
     });
-    this.network.on('session', (s) => this.onSession(s));
-    this.network.on('offline', (id) => this.onOffline(id));
-    this.network.on('log', (l) => this.log(l));
   }
 
-  /** Creates the profile and keys on first launch. */
-  static createProfile(paths: Paths, name: string): void {
-    loadOrCreateIdentity(paths);
-    saveConfig(paths, { name: cleanName(name) });
+  /** Creates the shared profile and keys on first launch (one profile for all apps). */
+  static createProfile(paths: Paths, name: string): string {
+    return Hub.createProfile(paths.hub, name).id;
+  }
+
+  /** Is there a profile yet (in any app)? */
+  static hasProfile(paths: Paths): boolean {
+    return Hub.hasProfile(paths.hub);
+  }
+
+  // ───────────── Shortcuts ─────────────
+
+  get identity() {
+    return this.net.identity;
+  }
+
+  get contacts() {
+    return this.net.contacts;
+  }
+
+  get network() {
+    return this.net.network;
   }
 
   // ───────────── Lifecycle ─────────────
 
   async start(): Promise<void> {
-    await this.network.start(this.preferredPort);
-    if (this.opts.discovery !== false) {
-      this.discovery = new Discovery(this.identity.id, () => this.name, () => this.network.port, {
-        ...this.opts.discoveryOptions,
-        udpPort: this.opts.discoveryPort,
-        hints: () => this.dialer.lastKnownIps(),
-        wants: (id) => this.dialer.wantsConnection(id),
-      });
-      this.discovery.on('change', () => {
-        for (const p of this.discovery?.peers.values() ?? []) {
-          // Recognized by ID: if a friend's address changed, remember the new one (the dialer retries)
-          const c = this.contacts.get(p.id);
-          if (c && (c.lastIp !== p.ip || c.lastPort !== p.port)) this.contacts.upsert(p.id, { lastIp: p.ip, lastPort: p.port });
-        }
-        this.dialer.discovered(this.discovery?.peers.keys() ?? []);
-        this.changed();
-      });
-      this.discovery.on('log', (l) => this.log(l));
-      this.discovery.on('callback', (id) => this.dialer.onCallback(id));
-      this.discovery.start();
-    }
-    this.dialer.start(this.opts.dialIntervalMs ?? 1500);
+    await this.net.start();
     this.changed();
   }
 
   async stop(): Promise<void> {
     this.games.leave();
     this.games.stop();
-    this.dialer.stop();
     this.toasts.stop();
-    this.discovery?.stop();
-    await this.network.stop();
+    await this.net.stop();
   }
 
   // ───────────── Subscription for React ─────────────
@@ -186,40 +181,47 @@ export class AppStore {
     });
   }
 
+  private applySettings(s: Settings): void {
+    if (setAccent(s.accent)) this.changed();
+  }
+
   // ───────────── Queries ─────────────
 
   get me() {
-    return {
-      id: this.identity.id,
-      name: this.name,
-      port: this.network.port,
-      ips: localIPv4s().map((i) => i.address),
-      discovery: this.discovery !== null,
-      scanning: this.discovery?.scanning ?? false,
-    };
+    return this.net.me;
   }
 
   get toast(): Toast | null {
     return this.toasts.current;
   }
 
+  get settings(): Settings {
+    return this.net.settings;
+  }
+
   isOnline(id: string): boolean {
-    return this.network.isOnline(id);
+    return this.net.isOnline(id);
   }
 
   friend(id: string): FriendView | undefined {
     const c = this.contacts.get(id);
     if (!c) return undefined;
     const online = this.isOnline(id);
-    return { ...c, display: displayName(c), online, away: online && this.away.has(id), racing: online && this.racingPeers.has(id) };
+    const p = this.net.presenceOf(id);
+    return {
+      ...c,
+      display: displayName(c),
+      online,
+      away: online && (p?.away ?? false),
+      racing: online && p?.extra.racing === true,
+      status: p?.status ?? 'available',
+      ...(p?.msg ? { statusMsg: p.msg } : {}),
+    };
   }
 
   /** Best name for any peer: own nickname/friend name, else what we remember from races. */
   peerName(id: string): string {
-    if (id === this.identity.id) return this.name;
-    const c = this.contacts.get(id);
-    if (c) return displayName(c);
-    return this.peerBook.get(id)?.name ?? 'Unknown';
+    return this.net.peerName(id);
   }
 
   /** Accepted friends who are online right now (who can be invited). */
@@ -233,7 +235,6 @@ export class AppStore {
 
   dashboard(): DashboardData {
     const all = this.contacts.all().map((c) => this.friend(c.id)!);
-    const known = new Set(all.map((f) => f.id));
     const presence = (f: FriendView) => (f.state !== 'accepted' ? 4 : f.racing ? 0 : f.online && !f.away ? 1 : f.away ? 2 : 3);
     const friends = all
       .filter((f) => f.state !== 'incoming')
@@ -248,18 +249,12 @@ export class AppStore {
         .sort((a, b) => b.lastActivity - a.lastActivity)
         .map((friend): RequestEntry => ({ kind: 'friend', friend })),
     ];
-    return {
-      requests,
-      friends,
-      nearby: [...(this.discovery?.peers.values() ?? [])].filter((p) => !known.has(p.id)).sort((a, b) => a.name.localeCompare(b.name)),
-    };
+    return { requests, friends, nearby: this.net.nearby() };
   }
 
   /** Number of accepted friends online. */
   onlineCount(): number {
-    let n = 0;
-    for (const id of this.network.sessions.keys()) if (this.contacts.get(id)?.state === 'accepted') n++;
-    return n;
+    return this.net.onlineCount();
   }
 
   stats(): Stats {
@@ -269,13 +264,11 @@ export class AppStore {
   leaderboard(): LeaderRow[] {
     const friends = new Map<string, string>();
     for (const c of this.contacts.all()) if (c.state === 'accepted') friends.set(c.id, displayName(c));
-    return leaderboard(this.stats(), { id: this.identity.id, name: this.name }, friends);
+    return leaderboard(this.stats(), { id: this.identity.id, name: this.net.name }, friends);
   }
 
   safetyCodeWith(id: string): string | null {
-    const c = this.contacts.get(id);
-    if (!c?.publicKey) return null;
-    return safetyCode(this.identity.publicRaw, Buffer.from(c.publicKey, 'base64url'));
+    return this.net.safetyCodeWith(id);
   }
 
   // ───────────── UI helpers ─────────────
@@ -285,11 +278,32 @@ export class AppStore {
   }
 
   private log(line: string): void {
-    if (!this.opts.debug) return;
-    try {
-      fs.appendFileSync(this.opts.paths.log, `${new Date().toISOString()} ${line}\n`);
-    } catch {
-      // logging must never break the app
+    if (this.opts.debug) appendLog(this.paths.log, line);
+  }
+
+  private onEvent(e: FriendEvent): void {
+    switch (e.kind) {
+      case 'accepted':
+        return this.showToast(e.byThem ? `${e.who} accepted your friend request` : `You and ${e.who} are now friends`, 'success');
+      case 'incoming':
+        this.showToast(`${e.who} wants to be friends`, 'info');
+        return this.net.notify('keyrace', `${e.who} wants to be friends`);
+      case 'removedUs':
+        return this.showToast(`${e.who} removed you as a friend – your request is waiting to be accepted`, 'error');
+      case 'declinedUs':
+        return this.showToast(`${e.who} declined your friend request`, 'error');
+      case 'withdrawn':
+        return this.showToast(`${e.who} withdrew their friend request`);
+      case 'requestSent':
+        return this.showToast(`Friend request sent to ${e.who} – waiting for them to accept`);
+      case 'unreachable':
+        return this.showToast(
+          `Can't reach ${e.who} at ${e.ip}:${e.port} yet – still trying. A firewall may be blocking keyrace ` +
+            '(Windows: allow Node.js for public networks · macOS: allow incoming connections for node).',
+          'error',
+        );
+      case 'linked':
+        return;
     }
   }
 
@@ -297,127 +311,82 @@ export class AppStore {
 
   /** Request to a peer from "Nearby". */
   requestNearby(id: string): void {
-    const p = this.discovery?.peers.get(id);
-    const existing = this.contacts.get(id);
-    if (existing) {
-      // they asked us first (maybe at the same moment) → that's a yes from both sides
-      if (existing.state === 'incoming') this.accept(id);
-      else if (existing.state === 'declined' || existing.state === 'blocked') this.setState(id, 'outgoing');
-      this.dialer.connect(id);
-      return;
-    }
-    if (!p) throw new Error('Player is no longer nearby');
-    this.contacts.upsert(id, { publicKey: '', name: p.name, state: 'outgoing', lastIp: p.ip, lastPort: p.port });
-    this.showToast(`Friend request sent to ${p.name}`);
-    this.dialer.connect(id);
-    this.changed();
+    const name = this.net.discovery?.peers.get(id)?.name;
+    const r = this.net.requestNearby(id);
+    if (r === 'sent') this.showToast(`Friend request sent to ${name ?? 'them'}`);
+    else if (r === 'accepted') this.showToast(`You and ${this.peerName(id)} are now friends`, 'success');
   }
 
   /** Ask again (after a decline). */
   request(id: string): void {
-    this.setState(id, 'outgoing');
+    this.net.request(id);
     this.showToast('Friend request sent again');
-    this.dialer.connect(id);
   }
 
   /** Add a friend by IP – for networks that block broadcast. */
-  async addByAddress(host: string, port = DEFAULT_PORT): Promise<string> {
-    const session = await this.network.dial(host, port, undefined, 'request');
-    return session.peerId;
+  addByAddress(host: string, port = APP.tcpPort): Promise<string> {
+    return this.net.addByAddress(host, port);
   }
 
   accept(id: string): void {
     const c = this.contacts.get(id);
-    if (!c || c.state !== 'incoming') return;
-    this.setState(id, 'accepted');
-    this.showToast(`You and ${displayName(c)} are now friends`, 'success');
-    this.dialer.connect(id);
+    if (c && this.net.accept(id)) this.showToast(`You and ${displayName(c)} are now friends`, 'success');
   }
 
   decline(id: string): void {
-    const c = this.contacts.get(id);
-    if (!c) return;
-    const s = this.network.get(id);
-    if (s) {
-      s.send({ t: 'decline' });
-      s.close('Declined');
-    }
-    this.contacts.remove(id);
-    this.showToast(`Declined ${displayName(c)}'s request`);
-    this.changed();
+    const c = this.net.decline(id);
+    if (c) this.showToast(`Declined ${displayName(c)}'s request`);
   }
 
   block(id: string): void {
-    const c = this.contacts.get(id);
-    if (!c) return;
-    this.contacts.upsert(id, { state: 'blocked' });
-    this.network.get(id)?.close('Blocked');
-    this.showToast(`${displayName(c)} is blocked. No more connections will be accepted.`, 'error');
-    this.changed();
+    const c = this.net.block(id);
+    if (c) this.showToast(`${displayName(c)} is blocked. No more connections will be accepted.`, 'error');
   }
 
   unblock(id: string): void {
-    const c = this.contacts.get(id);
-    if (c?.state !== 'blocked') return;
-    this.setState(id, 'outgoing');
-    this.showToast(`Unblocked ${displayName(c)} – friend request sent`, 'success');
-    this.dialer.connect(id);
+    const c = this.net.unblock(id);
+    if (c) this.showToast(`Unblocked ${displayName(c)} – friend request sent`, 'success');
   }
 
   removeFriend(id: string): void {
-    this.contacts.remove(id);
-    const s = this.network.get(id);
-    if (s) {
-      s.send({ t: 'state', name: this.name, state: 'none', port: this.network.port });
-      s.close('Friend removed');
-    }
-    this.changed();
+    const c = this.contacts.get(id);
+    // the stats should still be able to name them
+    if (c) this.net.peerBook.update(id, { name: displayName(c) });
+    this.net.remove(id);
   }
 
   rename(id: string, alias: string): void {
-    const clean = alias.trim() ? cleanName(alias) : undefined;
-    this.contacts.upsert(id, { alias: clean });
-    this.changed();
+    this.net.rename(id, alias);
   }
 
+  /** Changes the shared name (all apps). */
   setName(name: string): string {
-    this.name = cleanName(name);
-    saveConfig(this.opts.paths, { ...loadConfig(this.opts.paths), name: this.name });
-    for (const id of this.network.sessions.keys()) this.sendState(id);
-    this.discovery?.announce(false);
-    this.changed();
-    return this.name;
+    return this.net.setName(name);
   }
 
   // ───────────── Presence and notifications ─────────────
 
   /** Terminal window gained/lost focus. Terminals without focus reporting stay "focused". */
   setFocused(focused: boolean): void {
-    if (this.focused === focused) return;
-    this.focused = focused;
-    this.broadcastPresence();
-    this.changed();
-  }
-
-  private broadcastPresence(): void {
-    for (const id of this.network.sessions.keys()) this.sendPresence(id);
-  }
-
-  private sendPresence(id: string): void {
-    this.network.get(id)?.send({ t: 'presence', away: !this.focused, ...(this.games.racing ? { racing: true } : {}) });
+    this.net.setFocused(focused);
   }
 
   /** False while the terminal window is in the background (if the terminal reports focus). */
   get isFocused(): boolean {
-    return this.focused;
+    return this.net.isFocused;
+  }
+
+  /** Do not disturb (profile status): invites wait quietly, no notifications. */
+  get dnd(): boolean {
+    return this.net.dnd;
   }
 
   notificationsEnabled(): boolean {
-    return loadConfig(this.opts.paths)?.notifications !== false;
+    return this.net.notificationsEnabled();
   }
 
   setNotifications(on: boolean): void {
-    saveConfig(this.opts.paths, { ...loadConfig(this.opts.paths)!, notifications: on });
+    this.net.setNotifications(on);
   }
 
   setUpdateAvailable(version: string | null): void {
@@ -427,157 +396,13 @@ export class AppStore {
     else this.changed();
   }
 
-  private desktopNotify(title: string, body: string): void {
-    if (this.focused || !this.notificationsEnabled()) return;
-    (this.opts.notify ?? notify)(title, body);
-  }
-
   // ───────────── Races ─────────────
 
   private saveResult(rec: RaceRecord): { newBest: boolean } {
     // remember opponents who aren't friends, so stats can still name them
     for (const p of rec.players) {
-      if (p.id !== this.identity.id && !this.contacts.get(p.id)) this.peerBook.update(p.id, { name: p.name, lastSeen: rec.ts });
+      if (p.id !== this.identity.id && !this.contacts.get(p.id)) this.net.peerBook.update(p.id, { name: p.name, lastSeen: rec.ts });
     }
     return this.results.add(rec);
-  }
-
-  // ───────────── Network events ─────────────
-
-  private setState(id: string, state: ContactState): void {
-    this.contacts.upsert(id, { state, lastActivity: Date.now() });
-    this.sendState(id);
-    this.changed();
-  }
-
-  private sendState(id: string): void {
-    const s = this.network.get(id);
-    const c = this.contacts.get(id);
-    s?.send({ t: 'state', name: this.name, state: relStateFor(c?.state ?? null), port: this.network.port });
-  }
-
-  private onSession(s: Session): void {
-    const id = s.peerId;
-    let c = this.contacts.get(id);
-    if (c?.state === 'blocked') {
-      s.close('Blocked', false);
-      return;
-    }
-    this.dialer.connected(id);
-
-    if (s.tag === 'request') {
-      // user explicitly added them by IP
-      if (!c) {
-        c = this.contacts.upsert(id, { publicKey: '', name: s.peerName, state: 'outgoing' });
-        this.showToast(`Friend request sent to ${s.peerName} – waiting for them to accept`);
-      } else if (c.state === 'incoming') {
-        this.accept(id);
-      } else if (c.state === 'declined') {
-        this.contacts.upsert(id, { state: 'outgoing' });
-      }
-    }
-    if (c) {
-      this.contacts.upsert(id, {
-        publicKey: s.peerPublicRaw.toString('base64url'),
-        name: s.peerName,
-        lastIp: s.remoteAddress,
-        lastSeen: Date.now(),
-      });
-    }
-
-    s.on('message', (m) => this.onWire(s, m));
-    if (!c) {
-      setTimeout(() => {
-        if (s.isOpen && !this.contacts.get(id)) s.close('No request received');
-      }, UNKNOWN_PEER_TIMEOUT).unref();
-    }
-    this.sendState(id);
-    if (!this.focused || this.games.racing) this.sendPresence(id);
-    this.log(`Connected to ${s.peerName} (${id}) via ${s.remoteAddress}`);
-    this.changed();
-  }
-
-  private onOffline(id: string): void {
-    this.away.delete(id);
-    this.racingPeers.delete(id);
-    this.games.onPeerOffline(id);
-    this.contacts.upsert(id, { lastSeen: Date.now() });
-    this.changed();
-  }
-
-  private onWire(s: Session, m: Wire): void {
-    if (this.network.get(s.peerId) !== s) return;
-    const id = s.peerId;
-    switch (m.t) {
-      case 'state':
-        return this.onState(s, m);
-      case 'decline': {
-        const c = this.contacts.get(id);
-        if (c?.state === 'outgoing') {
-          this.contacts.upsert(id, { state: 'declined' });
-          this.showToast(`${displayName(c)} declined your friend request`, 'error');
-        }
-        return;
-      }
-      case 'presence': {
-        if (!this.contacts.get(id)) return;
-        const racing = m.racing === true;
-        if (m.away === this.away.has(id) && racing === this.racingPeers.has(id)) return;
-        if (m.away) this.away.add(id);
-        else this.away.delete(id);
-        if (racing) this.racingPeers.add(id);
-        else this.racingPeers.delete(id);
-        this.changed();
-        return;
-      }
-      case 'ping':
-      case 'pong':
-      case 'bye':
-        return;
-      default:
-        // everything else is about races; the game manager checks who may send what
-        if (this.contacts.get(id)?.state === 'blocked') return;
-        this.games.onWire(id, m);
-    }
-  }
-
-  private onState(s: Session, m: Extract<Wire, { t: 'state' }>): void {
-    const id = s.peerId;
-    const c = this.contacts.get(id);
-    const prev = c?.state ?? null;
-    const next = reconcile(prev, m.state);
-
-    if (next === null) {
-      if (c) {
-        this.contacts.remove(id);
-        this.showToast(`${displayName(c)} withdrew their friend request`);
-      }
-      s.close('Not a friend');
-      this.changed();
-      return;
-    }
-
-    const updated = this.contacts.upsert(id, {
-      publicKey: s.peerPublicRaw.toString('base64url'),
-      name: m.name,
-      state: next,
-      lastIp: s.remoteAddress,
-      lastPort: m.port || c?.lastPort,
-      lastSeen: Date.now(),
-      ...(prev !== next ? { lastActivity: Date.now() } : {}),
-    });
-    const who = displayName(updated);
-
-    if (next === 'accepted' && prev !== 'accepted') {
-      this.showToast(prev === 'outgoing' ? `${who} accepted your friend request` : `You and ${who} are now friends`, 'success');
-    } else if (next === 'incoming' && prev !== 'incoming') {
-      this.showToast(`${who} wants to be friends`, 'info');
-      this.desktopNotify('keyrace', `${who} wants to be friends`);
-    } else if (prev === 'accepted' && next === 'outgoing') {
-      this.showToast(`${who} removed you as a friend – your request is waiting to be accepted`, 'error');
-    }
-
-    if (relStateFor(prev) !== relStateFor(next)) this.sendState(id);
-    this.changed();
   }
 }

@@ -1,7 +1,7 @@
 import chalk from 'chalk';
 import { Box, Text } from 'ink';
 import type { TypingEngine } from '../../game/engine.js';
-import { theme } from '../theme.js';
+import { theme } from 'termcore/ui/theme';
 
 export const TEXT_LINES = 4;
 

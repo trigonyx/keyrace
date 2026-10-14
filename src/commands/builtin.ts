@@ -1,7 +1,8 @@
 import net from 'node:net';
-import { displayName } from '../core/contacts.js';
-import { formatId } from '../core/identity.js';
-import { DEFAULT_PORT } from '../core/network.js';
+import { displayName } from 'termcore/friends/book';
+import { formatId } from 'termcore/net/identity';
+import { statusText } from 'termcore/ui/presence';
+import { APP } from '../app.js';
 import {
   compareVersions,
   fetchLatestVersion,
@@ -16,7 +17,7 @@ import {
 import { VERSION } from '../core/version.js';
 import { bestKey } from '../game/stats.js';
 import { MODE_LABEL, PARAMS, settingsLabel, type Mode } from '../game/types.js';
-import { duration, pct, shortTime } from '../ui/format.js';
+import { duration, pct, shortTime } from 'termcore/ui/format';
 import { CommandRegistry, type Command, type CommandContext } from './registry.js';
 
 const STATE_LABEL: Record<string, string> = {
@@ -48,7 +49,7 @@ export function parseAddress(input: string): { host: string; port: number } {
   const m = /^\[?([^\]]+?)\]?(?::(\d{1,5}))?$/.exec(input.trim());
   if (!m) throw new Error(`Invalid address: ${input}`);
   const host = m[1]!;
-  const port = m[2] ? Number(m[2]) : DEFAULT_PORT;
+  const port = m[2] ? Number(m[2]) : APP.tcpPort;
   if (port < 1 || port > 65535) throw new Error(`Invalid port: ${m[2]}`);
   if (!net.isIP(host) && !/^[a-z0-9.-]+$/i.test(host)) throw new Error(`Invalid address: ${input}`);
   return { host, port };
@@ -124,14 +125,25 @@ export const builtinCommands: Command[] = [
     run(ctx) {
       const me = ctx.store.me;
       const addr = me.ips.length ? me.ips.map((ip) => `\`${ip}:${me.port}\``).join(', ') : 'no network';
-      ctx.ui.print(`### ${me.name}\n\n- **ID** \`${formatId(me.id, true)}\`\n- **Reachable at** ${addr}`);
+      const status = statusText(me.status, me.statusMsg);
+      ctx.ui.print(
+        [
+          `### ${me.name}`,
+          '',
+          `- **ID** \`${formatId(me.id, true)}\``,
+          ...(status ? [`- **Status** ${status}`] : []),
+          `- **Reachable at** ${addr}`,
+          '',
+          '_Name, ID and friends are shared by termchat, keyrace and termdrop (~/.termhub)._',
+        ].join('\n'),
+      );
     },
   },
   {
     name: 'name',
     usage: '<new name>',
     minArgs: 1,
-    description: 'Change your display name',
+    description: 'Change your display name (in all apps)',
     scope: 'global',
     run(ctx, _args, rest) {
       const name = ctx.store.setName(rest);
@@ -207,7 +219,7 @@ export const builtinCommands: Command[] = [
         `### ${f.display}${f.alias ? ` _(calls themselves ${f.name})_` : ''}`,
         '',
         `- **ID** \`${formatId(f.id, true)}\``,
-        `- **Status** ${f.racing ? 'racing' : f.away ? 'away' : f.online ? 'online' : 'offline'} · ${STATE_LABEL[f.state] ?? f.state}`,
+        `- **Status** ${f.racing ? 'racing' : f.away ? 'away' : f.online ? 'online' : 'offline'}${f.online && statusText(f.status, f.statusMsg) ? ` · ${statusText(f.status, f.statusMsg)}` : ''} · ${STATE_LABEL[f.state] ?? f.state}`,
         `- **Address** ${f.lastIp ? `\`${f.lastIp}:${f.lastPort ?? '?'}\`` : 'unknown'}`,
         `- **Safety code** ${code ? `\`${code}\`` : 'not connected yet'}`,
         '',
@@ -250,7 +262,7 @@ export const builtinCommands: Command[] = [
     name: 'notifications',
     aliases: ['notify'],
     usage: '[on|off]',
-    description: 'Desktop notifications for invites while keyrace is in the background',
+    description: 'Desktop notifications while the app is in the background (all apps)',
     scope: 'global',
     run(ctx, args) {
       const arg = args[0]?.toLowerCase();

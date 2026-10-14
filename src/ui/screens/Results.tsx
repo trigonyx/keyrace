@@ -3,9 +3,9 @@ import type { AppStore } from '../../core/store.js';
 import { ordinal } from '../../game/scoring.js';
 import type { Game } from '../../game/session.js';
 import { settingsLabel, settingsPhrase, type RankedResult } from '../../game/types.js';
-import { Footer } from '../components/Footer.js';
-import { duration, pct } from '../format.js';
-import { icons, senderHex, theme } from '../theme.js';
+import { Footer } from 'termcore/ui/components/Footer';
+import { duration, pct } from 'termcore/ui/format';
+import { icons, senderHex, theme } from 'termcore/ui/theme';
 
 const MEDALS = ['🥇', '🥈', '🥉'];
 

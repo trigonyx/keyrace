@@ -4,14 +4,14 @@ import { wallWpm } from '../../game/engine.js';
 import type { Game } from '../../game/session.js';
 import { runLimitMs, settingsLabel, WALL } from '../../game/types.js';
 import type { Actions } from '../actions.js';
-import { BIG_HEIGHT, BigText } from '../components/BigText.js';
-import { Dialog, type DialogSpec } from '../components/Dialog.js';
-import { Footer } from '../components/Footer.js';
+import { BIG_HEIGHT, BigText } from 'termcore/ui/components/BigText';
+import { Dialog, type DialogSpec } from 'termcore/ui/components/Dialog';
+import { Footer } from 'termcore/ui/components/Footer';
 import { barRows, ProgressBars } from '../components/ProgressBars.js';
 import { TEXT_LINES, TypingText } from '../components/TypingText.js';
-import { clockDown, duration, pct } from '../format.js';
-import { useTicker } from '../hooks.js';
-import { icons, theme } from '../theme.js';
+import { clockDown, duration, pct } from 'termcore/ui/format';
+import { useTicker } from 'termcore/ui/hooks';
+import { icons, theme } from 'termcore/ui/theme';
 
 interface Props {
   store: AppStore;

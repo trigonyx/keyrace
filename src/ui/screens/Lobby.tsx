@@ -6,13 +6,13 @@ import type { LobbyPlayer } from '../../game/lobby.js';
 import type { Game } from '../../game/session.js';
 import { settingsLabel } from '../../game/types.js';
 import type { Actions } from '../actions.js';
-import { Dialog, dialogHeight, type DialogSpec } from '../components/Dialog.js';
-import { Footer } from '../components/Footer.js';
-import { InputBox } from '../components/InputBox.js';
-import { cleanPaste, emptyEditor, type EditorState } from '../editor.js';
-import { useTicker } from '../hooks.js';
-import { useWheel } from '../mouse.js';
-import { icons, senderHex, theme } from '../theme.js';
+import { Dialog, dialogHeight, type DialogSpec } from 'termcore/ui/components/Dialog';
+import { Footer } from 'termcore/ui/components/Footer';
+import { InputBox } from 'termcore/ui/components/InputBox';
+import { cleanPaste, emptyEditor, type EditorState } from 'termcore/ui/editor';
+import { useTicker } from 'termcore/ui/hooks';
+import { useWheel } from 'termcore/ui/mouse';
+import { icons, senderHex, theme } from 'termcore/ui/theme';
 
 interface Props {
   store: AppStore;

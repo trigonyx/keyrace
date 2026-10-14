@@ -1,8 +1,9 @@
+import { cleanName, sanitizeText } from 'termcore/app/sanitize';
+import { encodeWire, parseWire as parseBaseWire, type BaseWire, type WireExtension } from 'termcore/friends/wire';
 import { isValidSettings, type Mode, type RunStatus } from '../game/types.js';
-import { cleanName, sanitizeText } from './sanitize.js';
 
-/** How one side sees the relationship. `outgoing` = "I want to be friends with you". */
-export type RelState = 'accepted' | 'outgoing' | 'none';
+export { encodeWire };
+export { reconcile, relStateFor, type ContactState, type RelState } from 'termcore/friends/state';
 
 /** A player as listed in invites and lobby updates. */
 export interface WirePlayer {
@@ -44,14 +45,12 @@ export interface WireResult {
 }
 
 /**
+ * keyrace's own messages (the base ones – state, presence, links … – come from termcore).
  * Game messages all carry a random game id (`gid`). The host is the authority: guests only
- * ever talk to the host, and the host relays to everyone (star topology).
+ * ever talk to the host, and the host relays to everyone (star topology). Presence carries
+ * `racing: true` while we're in a countdown or race.
  */
-export type Wire =
-  | { t: 'state'; name: string; state: RelState; port: number }
-  | { t: 'decline' }
-  /** Terminal in the background (`away`) or back in front; `racing` = in a countdown or race */
-  | { t: 'presence'; away: boolean; racing?: boolean }
+export type GameWire =
   /** host → guest */
   | { t: 'invite'; gid: string; mode: Mode; param: number; players: WirePlayer[] }
   /** host → guest: invite withdrawn, lobby closed, kicked before joining, or the host left */
@@ -74,10 +73,9 @@ export type Wire =
   /** host → racers */
   | { t: 'standings'; gid: string; players: WireStanding[] }
   /** host → racers: final ranking */
-  | { t: 'results'; gid: string; mode: Mode; param: number; players: WireResult[] }
-  | { t: 'ping' }
-  | { t: 'pong' }
-  | { t: 'bye' };
+  | { t: 'results'; gid: string; mode: Mode; param: number; players: WireResult[] };
+
+export type Wire = BaseWire | GameWire;
 
 const PEER_ID_RE = /^[A-Z2-7]{20}$/;
 export const GID_RE = /^[A-Za-z0-9_-]{8,32}$/;
@@ -130,31 +128,9 @@ function parseRun(o: Record<string, unknown>, allowLeft: boolean): Omit<WireStan
   };
 }
 
-/** Strictly validates incoming frames. Anything unexpected yields `null` and is dropped. */
-export function parseWire(buf: Buffer): Wire | null {
-  let o: Record<string, unknown>;
-  try {
-    o = JSON.parse(buf.toString('utf8'));
-  } catch {
-    return null;
-  }
-  if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
-
+/** Strictly validates keyrace's messages. Anything unexpected yields `null` and is dropped. */
+export function parseGameWire(o: Record<string, unknown>): GameWire | null {
   switch (o.t) {
-    case 'state': {
-      const port = Number(o.port);
-      if (!REL_STATES.includes(o.state as RelState)) return null;
-      return {
-        t: 'state',
-        name: cleanName(o.name),
-        state: o.state as RelState,
-        port: Number.isInteger(port) && port > 0 && port < 65536 ? port : 0,
-      };
-    }
-    case 'presence':
-      if (typeof o.away !== 'boolean') return null;
-      if (o.racing !== undefined && typeof o.racing !== 'boolean') return null;
-      return { t: 'presence', away: o.away, ...(o.racing ? { racing: true } : {}) };
     case 'invite':
     case 'lobby': {
       if (!isGid(o.gid) || !isValidSettings(o.mode, o.param)) return null;
@@ -241,47 +217,18 @@ export function parseWire(buf: Buffer): Wire | null {
       }
       return { t: 'results', gid: o.gid, mode: o.mode, param: o.param as number, players };
     }
-    case 'decline':
-    case 'ping':
-    case 'pong':
-    case 'bye':
-      return { t: o.t };
     default:
       return null;
   }
 }
 
-export function encodeWire(msg: Wire): Buffer {
-  return Buffer.from(JSON.stringify(msg), 'utf8');
-}
+export const WIRE: WireExtension<GameWire> = {
+  parse: parseGameWire,
+  // `racing`: in a countdown or race right now
+  presence: (o) => (o.racing === true ? { racing: true } : {}),
+};
 
-const REL_STATES: RelState[] = ['accepted', 'outgoing', 'none'];
-
-export type ContactState = 'accepted' | 'outgoing' | 'incoming' | 'declined' | 'blocked';
-
-/**
- * Reconciles our view with the peer's once connected or whenever a state changes.
- * Result: our new state (or `null` = not a friend).
- */
-export function reconcile(mine: ContactState | null, theirs: RelState): ContactState | null {
-  const peerWants = theirs === 'accepted' || theirs === 'outgoing';
-  switch (mine) {
-    case 'blocked':
-      return 'blocked';
-    case 'accepted':
-    case 'outgoing':
-      // Both want it → friends. If the peer removed us, it becomes a request again.
-      return peerWants ? 'accepted' : 'outgoing';
-    case 'incoming':
-      return peerWants ? 'incoming' : null;
-    case 'declined':
-      return peerWants ? 'incoming' : 'declined';
-    case null:
-      return peerWants ? 'incoming' : null;
-  }
-}
-
-/** What we tell the peer about our view. */
-export function relStateFor(state: ContactState | null): RelState {
-  return state === 'accepted' || state === 'outgoing' ? state : 'none';
+/** Everything that can arrive on a friend session. */
+export function parseWire(buf: Buffer): Wire | null {
+  return parseBaseWire(buf, WIRE);
 }

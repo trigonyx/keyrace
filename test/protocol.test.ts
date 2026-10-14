@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_FRAME } from '../src/core/framing.js';
+import { MAX_FRAME } from 'termcore/net/framing';
 import { encodeWire, MAX_CHAT, MAX_PLAYERS, MAX_WORDS, parseWire, type Wire } from '../src/core/protocol.js';
 import { wordCount } from '../src/game/session.js';
 import { randomWords } from '../src/game/words.js';

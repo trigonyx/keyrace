@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { resolvePaths, type Paths } from '../src/core/paths.js';
 import { AppStore } from '../src/core/store.js';
-import { readJsonl } from '../src/core/storage.js';
+import { readJsonl } from 'termcore/app/storage';
 import type { RaceRecord } from '../src/game/stats.js';
 import type { RaceSettings } from '../src/game/types.js';
 

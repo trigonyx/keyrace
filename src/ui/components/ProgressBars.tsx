@@ -2,7 +2,7 @@ import { Box, Text } from 'ink';
 import type { Game } from '../../game/session.js';
 import { ordinal } from '../../game/scoring.js';
 import { runLimitMs, wpmOf, type Progress } from '../../game/types.js';
-import { icons, senderHex, theme } from '../theme.js';
+import { icons, senderHex, theme } from 'termcore/ui/theme';
 
 export interface BarRow {
   id: string;

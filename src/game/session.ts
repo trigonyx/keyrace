@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import type { Wire, WirePlayer, WireStanding } from '../core/protocol.js';
 import { MAX_CHAT, MAX_PLAYERS } from '../core/protocol.js';
-import { sanitizeText } from '../core/sanitize.js';
+import { sanitizeText } from 'termcore/app/sanitize';
 import { TypingEngine } from './engine.js';
 import * as L from './lobby.js';
 import type { Lobby, LobbyPlayer, Who } from './lobby.js';
@@ -77,6 +77,8 @@ export interface GameDeps {
   toast(text: string, kind?: 'info' | 'success' | 'error'): void;
   /** desktop notification (the store only shows it while the terminal is in the background) */
   notify(title: string, body: string): void;
+  /** do not disturb: invites wait under Requests without a toast */
+  quiet?(): boolean;
   save(rec: RaceRecord): { newBest: boolean };
   /** we entered or left a race (presence for friends: "▶ racing") */
   racingChanged(racing: boolean): void;
@@ -689,8 +691,11 @@ export class GameManager {
     const g = this.game;
     if (g && g.role === 'guest' && g.hostId === from && g.phase === 'results') g.rematch = inv;
     const text = `${hostName} invites you to ${settingsPhrase(inv.settings)}`;
-    this.deps.toast(text, 'info');
-    this.deps.notify('keyrace', text);
+    // do not disturb: the invite just waits under Requests
+    if (!this.deps.quiet?.()) {
+      this.deps.toast(text, 'info');
+      this.deps.notify('keyrace', text);
+    }
     this.deps.changed();
   }
 

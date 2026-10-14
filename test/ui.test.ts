@@ -6,7 +6,7 @@ import { createElement } from 'react';
 import stringWidth from 'string-width';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parseAddress, registry } from '../src/commands/builtin.js';
-import { parseCommand, tokenize } from '../src/commands/parse.js';
+import { parseCommand, tokenize } from 'termcore/ui/commands/parse';
 import { resolvePaths } from '../src/core/paths.js';
 import { AppStore } from '../src/core/store.js';
 import { VERSION } from '../src/core/version.js';
@@ -15,16 +15,16 @@ import { rank } from '../src/game/scoring.js';
 import type { Game } from '../src/game/session.js';
 import type { RaceSettings } from '../src/game/types.js';
 import type { Actions } from '../src/ui/actions.js';
-import { bigLines } from '../src/ui/components/BigText.js';
+import { bigLines } from 'termcore/ui/components/BigText';
 import { LOGO, LOGO_SMALL } from '../src/ui/components/Banner.js';
-import { Header } from '../src/ui/components/Header.js';
+import { Header } from 'termcore/ui/components/Header';
 import { layoutWords, visibleLines } from '../src/ui/components/TypingText.js';
-import { cleanPaste, edit, layoutEditor } from '../src/ui/editor.js';
+import { cleanPaste, edit, layoutEditor } from 'termcore/ui/editor';
 import { Dashboard } from '../src/ui/screens/Dashboard.js';
 import { Lobby } from '../src/ui/screens/Lobby.js';
 import { Race } from '../src/ui/screens/Race.js';
 import { Results } from '../src/ui/screens/Results.js';
-import { renderText } from '../src/ui/text.js';
+import { renderText } from 'termcore/ui/text';
 
 const strip = (s: string) => s.replace(/\u001b\[[0-9;]*m/g, '');
 const frame = (r: { lastFrame(): string | undefined }) => strip(r.lastFrame() ?? '');
@@ -144,7 +144,7 @@ describe('screens', () => {
   it('header shows the app version, name and friends online', () => {
     const s = store('Max');
     for (const width of [100, 50]) {
-      const r = render(createElement(Header, { store: s, width }));
+      const r = render(createElement(Header, { app: 'keyrace', version: VERSION, me: s.me, address: '10.0.0.1:5052', online: s.onlineCount(), width }));
       expect(frame(r)).toContain(`keyrace  v${VERSION}`);
       expect(frame(r)).toContain('Max');
       r.unmount();

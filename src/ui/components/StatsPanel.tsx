@@ -3,8 +3,8 @@ import type { AppStore, FriendView } from '../../core/store.js';
 import { ordinal } from '../../game/scoring.js';
 import { bestKey, type Best } from '../../game/stats.js';
 import { PARAMS, settingsLabel, type Mode } from '../../game/types.js';
-import { duration, pct, shortTime } from '../format.js';
-import { theme } from '../theme.js';
+import { duration, pct, shortTime } from 'termcore/ui/format';
+import { theme } from 'termcore/ui/theme';
 
 const Title = ({ children }: { children: string }) => (
   <Text color={theme.dim} bold>
