@@ -70,8 +70,15 @@ kept as a backup in `~/.termhub/legacy`). Friends who updated too recognize you 
 signed link, so nobody has to add anyone again – **ask your friends to update too.** Until they do, a 1.x
 keyrace sees an updated friend as a stranger.
 
-**termhub** – one app to see all your friends and where they're online, set your profile color and status,
-and start chats, races and transfers from one place – is coming soon.
+**termhub** – the hub of the suite: your profile (name, color, status), all your friends and in which app
+they're online right now, the settings all apps share, an encrypted backup of your identity – and it installs,
+opens and updates termchat, keyrace and termdrop for you:
+
+```sh
+npm i -g https://github.com/trigonyx/termhub/tarball/main
+```
+
+See [termhub](https://github.com/trigonyx/termhub).
 
 ## How it works
 
@@ -81,7 +88,7 @@ and start chats, races and transfers from one place – is coming soon.
 - **Races:** the one who starts a race is its host. The host's keyrace picks the words, runs the lobby, collects everyone's progress, shows it to all players and decides the results. Everyone races on their own clock (the countdown starts when the text arrives), so it doesn't matter if the computers' clocks differ. Invited friends don't need to be friends with each other – everything goes through the host.
 - **Firewalls:** keyrace needs a direct connection to each friend, and it's enough if one of the two computers accepts incoming connections. If it can't reach a friend, it says so. Then allow Node.js in the firewall: on Windows, also for *public* networks (school Wi-Fi usually counts as public); on macOS, click "Allow" when asked whether node may accept incoming connections.
 - **Security:** every connection is authenticated and encrypted (X25519 + Ed25519 + ChaCha20-Poly1305, using only Node's built-in crypto). `/whois` shows a safety code. Compare it once in person, and you can rule out anyone sitting in the middle.
-- **Profile color and status:** friends who picked a profile color show up in it – in the list, the lobby and the race bars (otherwise in a color from their ID) – and their status (busy, do not disturb, a short message) appears next to their name. You set yours in termhub (coming soon); until then you can edit `~/.termhub/profile.json`. In **do not disturb**, race invites wait quietly under "Requests" instead of popping up, and there are no desktop notifications.
+- **Profile color and status:** friends who picked a profile color show up in it – in the list, the lobby and the race bars (otherwise in a color from their ID) – and their status (busy, do not disturb, a short message) appears next to their name. You set yours in [termhub](https://github.com/trigonyx/termhub) (Profile tab). In **do not disturb**, race invites wait quietly under "Requests" instead of popping up, and there are no desktop notifications.
 - keyrace, termchat and termdrop use different ports, so all of them can run at the same time – with the same friends.
 
 ## Modes
@@ -209,7 +216,7 @@ Then press `a` in one of them and enter `127.0.0.1:5062` (or `:5063`). termchat 
 
 ## Data
 
-Readable only by you. Shared by termchat, keyrace and termdrop, in `~/.termhub/`:
+Readable only by you. Shared by termchat, keyrace, termdrop and termhub, in `~/.termhub/`:
 
 - `identity.json`: your secret key. **Don't share it.** If it's lost, you get a new ID.
 - `profile.json`: your name, profile color and status
@@ -227,7 +234,7 @@ keyrace's own, in `~/.keyrace/`:
 
 ## Details and design decisions
 
-- **Ports:** TCP 5052 for connections, UDP 5053 for discovery (termchat uses 5050/5051, termdrop 5054/5055, termhub will use 5056/5057).
+- **Ports:** TCP 5052 for connections, UDP 5053 for discovery (termchat uses 5050/5051, termdrop 5054/5055, termhub 5056/5057).
 - **Shared core:** identity, encryption, discovery, friends and the shared data folder come from termcore (a sibling repo), which is bundled into `dist/` – nothing extra to install.
 - **Invites while racing** are declined automatically and the host sees "busy racing"; invites that arrive in a lobby or on the results screen wait under "Requests". An invite disappears when the host closes the lobby or goes offline, and a newer invite from the same host replaces the older one.
 - **Who can be invited:** online friends. Up to 16 players per race.
