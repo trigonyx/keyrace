@@ -95,6 +95,32 @@ var installSpec = (app) => `https://github.com/${app.repo}/tarball/main`;
 var installCmd = (app) => `npm i -g ${installSpec(app)}`;
 
 // ../termcore/src/app/update.ts
+function npmCommand(env = process.env) {
+  if (env.TERMHUB_NPM) return { cmd: env.TERMHUB_NPM, shell: false };
+  const win = process.platform === "win32";
+  return { cmd: win ? "npm.cmd" : "npm", shell: win };
+}
+function runNpm(args, opts = {}) {
+  return new Promise((resolve) => {
+    const { cmd, shell } = npmCommand();
+    let output = "";
+    const take = (d) => {
+      const s = String(d);
+      output += s;
+      opts.onOutput?.(s);
+    };
+    try {
+      const p = spawn(cmd, args, { stdio: opts.inherit ? "inherit" : ["ignore", "pipe", "pipe"], shell });
+      p.stdout?.on("data", take);
+      p.stderr?.on("data", take);
+      p.on("error", (err) => resolve({ ok: false, output: `${output}
+${err.message}` }));
+      p.on("close", (code) => resolve({ ok: code === 0, output }));
+    } catch (err) {
+      resolve({ ok: false, output: err.message });
+    }
+  });
+}
 var VERSION_RE = /^\d+\.\d+\.\d+$/;
 var PERMISSION_RE = /EACCES|EPERM|permission denied/i;
 function compareVersions(a, b) {
@@ -190,48 +216,58 @@ Update it there with \`git pull && npm install\`, or install the release with \`
       return "local";
     }
   }
-  function npmInstall(spec, inherit, target) {
+  function npmInstall(spec, inherit, target, onOutput) {
     const dir = appDir2();
     const args = target === "global" ? ["install", "-g", "--prefer-online", spec] : (
       // own cache: after `sudo npm ...`, ~/.npm often contains root-owned files
       ["install", "--prefix", dir, "--cache", path4.join(dir, ".npm-cache"), "--prefer-online", "--no-audit", "--no-fund", spec]
     );
-    return new Promise((resolve) => {
-      const win = process.platform === "win32";
-      let output = "";
-      try {
-        if (target === "local") fs.mkdirSync(dir, { recursive: true });
-        const p = spawn(win ? "npm.cmd" : "npm", args, {
-          stdio: inherit ? "inherit" : ["ignore", "pipe", "pipe"],
-          shell: win
-        });
-        p.stdout?.on("data", (d) => output += d);
-        p.stderr?.on("data", (d) => output += d);
-        p.on("error", (err) => resolve({ ok: false, output: `${output}
-${err.message}` }));
-        p.on("close", (code) => resolve({ ok: code === 0, output }));
-      } catch (err) {
-        resolve({ ok: false, output: err.message });
-      }
-    });
+    try {
+      if (target === "local") fs.mkdirSync(dir, { recursive: true });
+    } catch (err) {
+      return Promise.resolve({ ok: false, output: err.message });
+    }
+    return runNpm(args, { inherit, onOutput });
   }
-  async function runInstall2({ inherit, version }) {
+  async function runInstall2({
+    inherit,
+    version,
+    target: forced,
+    onOutput
+  }) {
     if (!REPO_CONFIGURED2 && !env("INSTALL_SPEC")) return { ok: false, output: "The GitHub repo is not set in package.json yet." };
     const attempt = async (target2) => {
       if (version && !env("INSTALL_SPEC")) {
-        const res2 = await npmInstall(specFor(version), inherit, target2);
+        const res2 = await npmInstall(specFor(version), inherit, target2, onOutput);
         if (res2.ok || PERMISSION_RE.test(res2.output)) return res2;
       }
-      return npmInstall(specFor(), inherit, target2);
+      return npmInstall(specFor(), inherit, target2, onOutput);
     };
-    const target = installTarget2();
+    const target = forced ?? installTarget2();
     const res = await attempt(target);
-    if (!res.ok && target === "global" && !isRoot() && PERMISSION_RE.test(res.output)) return attempt("local");
+    if (!res.ok && target === "global" && !isRoot() && PERMISSION_RE.test(res.output)) {
+      onOutput?.(`
+No permission for npm's global folder \u2013 installing into ${appDir2()} instead.
+`);
+      return attempt("local");
+    }
     return res;
+  }
+  async function runUninstall({ target, inherit = false, onOutput }) {
+    if (target === "global") return runNpm(["rm", "-g", name], { inherit, onOutput });
+    try {
+      fs.rmSync(appDir2(), { recursive: true, force: true });
+      const msg = `Removed ${appDir2()}
+`;
+      onOutput?.(msg);
+      return { ok: true, output: msg };
+    } catch (err) {
+      return { ok: false, output: err.message };
+    }
   }
   function installedVersion2(script = process.argv[1] ?? "") {
     return new Promise((resolve) => {
-      execFile(process.execPath, [script, "--version"], { timeout: 15e3 }, (err, stdout) => {
+      execFile(process.execPath, [script, "--version"], { timeout: 15e3, env: { ...process.env, [`${P}_NO_UPDATE_CHECK`]: "1" } }, (err, stdout) => {
         const version = new RegExp(`${name} (\\d+\\.\\d+\\.\\d+)`).exec(String(stdout))?.[1];
         resolve(err || !version ? null : version);
       });
@@ -260,6 +296,7 @@ ${err.message}` }));
     newerLocalInstall: newerLocalInstall2,
     installTarget: installTarget2,
     runInstall: runInstall2,
+    runUninstall,
     installedVersion: installedVersion2,
     staleInstallHint: staleInstallHint2,
     installHint: installHint2
@@ -269,7 +306,7 @@ ${err.message}` }));
 // package.json
 var package_default = {
   name: "keyrace",
-  version: "2.0.0",
+  version: "2.1.0",
   description: "Multiplayer typing races for your local network, right in the terminal.",
   repository: {
     type: "git",
@@ -513,7 +550,7 @@ async function startInstanceServer(socket, onRequest) {
 }
 
 // src/ui/App.tsx
-import { Box as Box18, Text as Text19, useApp, useInput as useInput10 } from "ink";
+import { Box as Box19, Text as Text20, useApp, useInput as useInput10 } from "ink";
 import { useCallback, useEffect as useEffect6, useMemo, useRef as useRef5, useState as useState9 } from "react";
 
 // src/commands/builtin.ts
@@ -574,6 +611,8 @@ function mergeFriends(a, b, id = a.id) {
   if (Object.keys(ports).length) out.ports = ports;
   const lastSeen = max(a.lastSeen, b.lastSeen);
   if (lastSeen !== void 0) out.lastSeen = lastSeen;
+  if (recent.status) out.status = recent.status;
+  if (recent.statusMsg) out.statusMsg = recent.statusMsg;
   if (Object.keys(apps).length) out.apps = apps;
   return out;
 }
@@ -590,7 +629,7 @@ function mergePeers(a, b, id = a.id) {
 }
 
 // ../termcore/src/friends/book.ts
-var SHARED = /* @__PURE__ */ new Set(["publicKey", "name", "alias", "state", "color", "lastIp", "lastSeen", "lastActivity", "createdAt"]);
+var SHARED = /* @__PURE__ */ new Set(["publicKey", "name", "alias", "state", "color", "lastIp", "lastSeen", "lastActivity", "createdAt", "status", "statusMsg"]);
 function displayName(c2) {
   return c2.alias || c2.name;
 }
@@ -1668,7 +1707,8 @@ var Dialer = class {
   }
   target(id) {
     const p = this.d.discovery()?.find(id);
-    if (p) return { ip: p.ip, port: p.port, discovered: true };
+    const port = p && (this.d.portOf ? this.d.portOf(p) : p.port);
+    if (p && port) return { ip: p.ip, port, discovered: true };
     const last = this.d.lastAddress(id);
     return last ? { ...last, discovered: false } : null;
   }
@@ -2724,6 +2764,8 @@ function parseFriend(raw) {
     lastSeen: num(o.lastSeen),
     lastActivity: num(o.lastActivity) ?? now,
     createdAt: num(o.createdAt) ?? now,
+    status: isStatus(o.status) && o.status !== "available" ? o.status : void 0,
+    statusMsg: cleanStatusMsg(o.statusMsg),
     apps: parseApps2(o.apps)
   });
 }
@@ -3215,11 +3257,12 @@ var Hub = class {
   static profileName(paths) {
     return parseProfile(readJson(paths.profile, null))?.name ?? null;
   }
-  /** Creates identity (if there's none yet) and profile on first launch. */
-  static createProfile(paths, name) {
+  /** Creates identity (if there's none yet) and profile on first launch (termhub also asks for a color). */
+  static createProfile(paths, name, color) {
     const identity = loadOrCreateIdentity(paths.identity);
     const prev = parseProfile(readJson(paths.profile, null));
-    writeJsonAtomic(paths.profile, { ...prev ?? { v: 1, status: "available" }, name: cleanName(name) });
+    const hex = normalizeColor(color);
+    writeJsonAtomic(paths.profile, { ...prev ?? { v: 1, status: "available" }, name: cleanName(name), ...hex ? { color: hex } : {} });
     return identity;
   }
   /** Follows file changes by the other apps. */
@@ -3299,7 +3342,7 @@ function applyLinks(hub, appHome, rekey) {
   return applied;
 }
 function migrationNotice(friends) {
-  return `Your profile and ${friends === 1 ? "1 friend" : `${friends} friends`} moved to ~/.termhub \u2013 shared by termchat, keyrace and termdrop`;
+  return `Your profile and ${friends === 1 ? "1 friend" : `${friends} friends`} moved to ~/.termhub \u2013 shared by termchat, keyrace, termdrop and termhub`;
 }
 
 // ../termcore/src/friends/wire.ts
@@ -3393,7 +3436,8 @@ var FriendNet = class {
       },
       alsoWants: (id) => opts.hooks.alsoWants?.(id) ?? false,
       log: (l) => this.log(l),
-      unreachable: (id, info) => this.event({ kind: "unreachable", id, who: this.peerName(id), ...info })
+      unreachable: (id, info) => this.event({ kind: "unreachable", id, who: this.peerName(id), ...info }),
+      portOf: (p) => this.ownPort(p)
     });
     this.network.on("session", (s) => this.onSession(s));
     this.network.on("purpose", (c2) => opts.hooks.purpose ? opts.hooks.purpose(c2) : c2.fs.destroy());
@@ -3543,6 +3587,17 @@ var FriendNet = class {
     if (c2) return displayName(c2);
     return this.peerBook.get(id)?.name ?? "Unknown";
   }
+  /**
+   * Our app's TCP port on a discovered peer's computer: the one it announced if it is our app,
+   * else from the list of apps running there (`apps`). termhub sees people through every app.
+   */
+  ownPort(p) {
+    return p.app === this.app.name ? p.port : p.apps?.[this.app.name];
+  }
+  /** The discovered peer that is (or was, see links) `id`. */
+  discovered(id) {
+    return this.discoveryRef?.find(id);
+  }
   /** People on the network running this app who aren't friends (an old id they announce counts). */
   nearby() {
     return [...this.discoveryRef?.peers.values() ?? []].filter((p) => !this.contacts.get(p.id) && !(p.was ?? []).some((w) => this.contacts.get(w))).sort((a, b) => a.name.localeCompare(b.name));
@@ -3579,7 +3634,9 @@ var FriendNet = class {
       return result;
     }
     if (!p) throw new Error("They are no longer nearby");
-    this.contacts.upsert(id, { publicKey: "", name: p.name, state: "outgoing", lastIp: p.ip, lastPort: p.port });
+    const port = this.ownPort(p);
+    this.contacts.upsert(id, { publicKey: "", name: p.name, state: "outgoing", lastIp: p.ip, ...port ? { lastPort: port } : {} });
+    this.contacts.setPorts(id, { ...p.apps, [p.app]: p.port });
     this.connect(id);
     this.changed();
     return "sent";
@@ -3702,12 +3759,15 @@ var FriendNet = class {
     if (!d) return;
     const seen = [];
     for (const p of d.peers.values()) {
+      const port = this.ownPort(p);
       for (const id of [p.id, ...p.was ?? []]) {
         const c2 = this.contacts.get(id);
-        if (c2 && (c2.lastIp !== p.ip || c2.lastPort !== p.port)) this.contacts.upsert(id, { lastIp: p.ip, lastPort: p.port });
-        if (c2 && p.apps) this.contacts.setPorts(id, p.apps);
+        if (c2 && (c2.lastIp !== p.ip || port && c2.lastPort !== port)) {
+          this.contacts.upsert(id, { lastIp: p.ip, ...port ? { lastPort: port } : {} });
+        }
+        if (c2 && (p.apps || p.app !== this.app.name)) this.contacts.setPorts(id, { ...p.apps, [p.app]: p.port });
         const known = this.peerBook.get(id);
-        if (known && (known.lastIp !== p.ip || known.lastPort !== p.port)) this.peerBook.update(id, { lastIp: p.ip, lastPort: p.port });
+        if (known && (known.lastIp !== p.ip || port && known.lastPort !== port)) this.peerBook.update(id, { lastIp: p.ip, ...port ? { lastPort: port } : {} });
         seen.push(id);
       }
     }
@@ -3853,6 +3913,7 @@ var FriendNet = class {
         const next = { away, status: status ?? "available", ...msg ? { msg } : {}, extra };
         if (JSON.stringify(next) === JSON.stringify(this.presenceMap.get(id))) return;
         this.presenceMap.set(id, next);
+        this.rememberStatus(id, next);
         this.opts.hooks.presence?.(id, next);
         this.changed();
         return;
@@ -3865,6 +3926,14 @@ var FriendNet = class {
         if (this.contacts.get(id)?.state === "blocked") return;
         this.opts.hooks.message(s, m);
     }
+  }
+  /** Keeps a friend's status in friends.json, so termhub and our other apps know it without a session. */
+  rememberStatus(id, p) {
+    const c2 = this.contacts.get(id);
+    if (!c2) return;
+    const status = p.status === "available" ? void 0 : p.status;
+    if ((c2.status ?? void 0) === status && c2.statusMsg === p.msg) return;
+    this.contacts.upsert(id, { status, statusMsg: p.msg });
   }
   /** Their links: an old id we know is them now. Only links to the session's own key count. */
   onLinks(s, links) {
@@ -6564,11 +6633,28 @@ var MouseFilterStdin = class extends PassThrough {
     super();
     this.source = source;
     source.setEncoding("utf8");
-    source.on("data", (chunk) => this.feed(chunk));
+    source.on("data", this.onData);
+    source.resume();
   }
   isTTY = true;
   pending = "";
   timer = null;
+  onData = (chunk) => this.feed(chunk);
+  /**
+   * Stops reading the terminal: the real stdin is paused and no longer fed in here. termhub
+   * does this before another app takes over the terminal, so no keystroke goes to both.
+   */
+  detach() {
+    this.source.off("data", this.onData);
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    this.pending = "";
+    try {
+      this.source.setRawMode(false);
+    } catch {
+    }
+    this.source.pause();
+  }
   feed(chunk) {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
@@ -7142,7 +7228,7 @@ function PromptDialog({ spec, width }) {
   ] });
 }
 function PickDialog({ spec, width }) {
-  const [cursor, setCursor] = useState3(0);
+  const [cursor, setCursor] = useState3(() => Math.max(0, spec.options.findIndex((o) => o.id === spec.opts?.initial)));
   const [chosen, setChosen] = useState3(() => new Set(spec.opts?.preselect ?? []));
   const n = spec.options.length;
   useWheel((dir) => setCursor((c2) => Math.max(0, Math.min(n - 1, c2 + dir))));
@@ -7364,13 +7450,13 @@ function StatsPanel({ store, friend, width, compact: compact2 }) {
   ] });
 }
 
-// src/ui/screens/useCommandInput.ts
+// ../termcore/src/ui/commands/useCommandInput.ts
 import { useEffect as useEffect4, useState as useState4 } from "react";
-function useCommandInput({ editor, setEditor, onSubmit, onEscape }) {
+function useCommandInput({ registry: registry2, editor, setEditor, onSubmit, onEscape }) {
   const [selected, setSelected] = useState4(0);
   const match = /^\/(\S*)$/.exec(editor.value);
   const filter = match?.[1] ?? null;
-  const commands = filter !== null ? registry.suggest(filter) : [];
+  const commands = filter !== null ? registry2.suggest(filter) : [];
   const items = commands.map((c2) => ({ key: c2.name, label: `/${c2.name} ${c2.usage ?? ""}`.trimEnd(), description: c2.description }));
   const sel = Math.min(selected, Math.max(0, items.length - 1));
   useEffect4(() => setSelected(0), [filter]);
@@ -7394,7 +7480,7 @@ function useCommandInput({ editor, setEditor, onSubmit, onEscape }) {
         return true;
       }
       if (key.return && !key.meta) {
-        const exact = filter ? registry.find(filter) : void 0;
+        const exact = filter ? registry2.find(filter) : void 0;
         const target = exact ?? (commands.length === 1 ? commands[0] : null);
         if (!target || (target.minArgs ?? 0) > 0) complete(target ?? commands[sel]);
         else onSubmit(`/${target.name}`);
@@ -7408,6 +7494,11 @@ function useCommandInput({ editor, setEditor, onSubmit, onEscape }) {
     return false;
   };
   return { items, selected: sel, onKey, submit: onSubmit };
+}
+
+// src/ui/screens/useCommandInput.ts
+function useCommandInput2(opts) {
+  return useCommandInput({ registry, ...opts });
 }
 
 // src/ui/screens/Dashboard.tsx
@@ -7463,7 +7554,7 @@ function Dashboard({ store, width, height, rows, actions, dialog, selectedKey, o
     setEditor(emptyEditor);
   };
   const selectedId = current?.type === "friend" ? current.friend.id : null;
-  const cmd = useCommandInput({
+  const cmd = useCommandInput2({
     editor,
     setEditor,
     onSubmit: async (value) => {
@@ -7862,58 +7953,123 @@ function Lobby({ store, game, width, height, actions, dialog }) {
 }
 
 // ../termcore/src/ui/components/Onboarding.tsx
-import { Box as Box11, Text as Text12, useInput as useInput6 } from "ink";
+import { Box as Box12, Text as Text13, useInput as useInput6 } from "ink";
 import { useState as useState7 } from "react";
-import { Fragment as Fragment6, jsx as jsx12, jsxs as jsxs11 } from "react/jsx-runtime";
-function Onboarding({ logo, tagline, width, create, onDone, question = "What should your friends see you as?" }) {
+
+// ../termcore/src/ui/components/Swatches.tsx
+import { Box as Box11, Text as Text12 } from "ink";
+import { jsx as jsx12, jsxs as jsxs11 } from "react/jsx-runtime";
+var SWATCH_WIDTH = 4;
+function Swatches({ colors, selected, width, active = true }) {
+  const perRow = Math.max(1, Math.floor(width / SWATCH_WIDTH));
+  const rows = [];
+  colors.forEach((c2, index) => {
+    const r = Math.floor(index / perRow);
+    (rows[r] ??= []).push({ hex: c2.hex, index });
+  });
+  return /* @__PURE__ */ jsx12(Box11, { flexDirection: "column", children: rows.map((row, r) => /* @__PURE__ */ jsx12(Text12, { children: row.map(({ hex, index }) => {
+    const sel = index === selected;
+    const bracket = sel ? active ? theme.accent : theme.dim : void 0;
+    return /* @__PURE__ */ jsxs11(Text12, { children: [
+      /* @__PURE__ */ jsx12(Text12, { color: bracket, children: sel ? "[" : " " }),
+      /* @__PURE__ */ jsx12(Text12, { color: hex, children: "\u2588\u2588" }),
+      /* @__PURE__ */ jsx12(Text12, { color: bracket, children: sel ? "]" : " " })
+    ] }, index);
+  }) }, r)) });
+}
+
+// ../termcore/src/ui/components/Onboarding.tsx
+import { Fragment as Fragment6, jsx as jsx13, jsxs as jsxs12 } from "react/jsx-runtime";
+function Onboarding({ logo, tagline, width, create, onDone, question = "What should your friends see you as?", colors }) {
   const [editor, setEditor] = useState7(emptyEditor);
+  const [name, setName] = useState7(null);
+  const [colorIndex, setColorIndex] = useState7(0);
   const [created, setCreated] = useState7(null);
   const [error, setError] = useState7(null);
   useInput6((_i, key) => key.return && onDone(), { isActive: created !== null });
-  const submit = (value) => {
-    const name = value.trim();
-    if (!name) {
-      setError("Please enter a name.");
-      return;
-    }
+  const finish2 = (n, color) => {
     try {
-      setCreated({ name, id: create(name) });
+      setCreated({ name: n, id: create(n, color), ...color ? { color } : {} });
     } catch (err) {
       setError(`Could not create profile: ${err.message}`);
     }
   };
+  const submit = (value) => {
+    const n = value.trim();
+    if (!n) {
+      setError("Please enter a name.");
+      return;
+    }
+    if (colors?.length) setName(n);
+    else finish2(n);
+  };
+  const picking = name !== null && created === null && !!colors?.length;
+  useInput6(
+    (input, key) => {
+      const n = colors.length;
+      if (key.leftArrow || input === "h") setColorIndex((i) => (i - 1 + n) % n);
+      else if (key.rightArrow || input === "l" || key.tab) setColorIndex((i) => (i + 1) % n);
+      else if (key.escape) setName(null);
+      else if (key.return) finish2(name, colors[colorIndex].hex);
+    },
+    { isActive: picking }
+  );
   const boxWidth = Math.min(64, width - 4);
-  return /* @__PURE__ */ jsxs11(Box11, { flexDirection: "column", paddingX: 2, paddingY: 1, children: [
-    logo.map((l, i) => /* @__PURE__ */ jsx12(Text12, { color: theme.accent, children: l }, i)),
-    /* @__PURE__ */ jsx12(Text12, { color: theme.dim, children: tagline }),
-    /* @__PURE__ */ jsx12(Text12, { children: " " }),
-    created ? /* @__PURE__ */ jsxs11(Fragment6, { children: [
-      /* @__PURE__ */ jsxs11(Text12, { children: [
+  let body;
+  if (created) {
+    body = /* @__PURE__ */ jsxs12(Fragment6, { children: [
+      /* @__PURE__ */ jsxs12(Text13, { children: [
         "Welcome, ",
-        /* @__PURE__ */ jsx12(Text12, { bold: true, children: created.name }),
+        /* @__PURE__ */ jsx13(Text13, { bold: true, color: created.color, children: created.name }),
         "!"
       ] }),
-      /* @__PURE__ */ jsx12(Text12, { children: " " }),
-      /* @__PURE__ */ jsx12(Text12, { color: theme.dim, children: "Your personal ID has been created:" }),
-      /* @__PURE__ */ jsxs11(Text12, { color: theme.accent, bold: true, children: [
+      /* @__PURE__ */ jsx13(Text13, { children: " " }),
+      /* @__PURE__ */ jsx13(Text13, { color: theme.dim, children: "Your personal ID has been created:" }),
+      /* @__PURE__ */ jsxs12(Text13, { color: theme.accent, bold: true, children: [
         "  ",
         formatId(created.id, true)
       ] }),
-      /* @__PURE__ */ jsx12(Text12, { children: " " }),
-      /* @__PURE__ */ jsx12(Text12, { color: theme.dim, children: "It's tied to a secret key on this device. That's how your friends recognize" }),
-      /* @__PURE__ */ jsx12(Text12, { color: theme.dim, children: "you \u2013 even if your name or IP address changes. termchat, keyrace and termdrop" }),
-      /* @__PURE__ */ jsx12(Text12, { color: theme.dim, children: "share it, along with your friends. Every connection is end-to-end encrypted." }),
-      /* @__PURE__ */ jsx12(Text12, { children: " " }),
-      /* @__PURE__ */ jsxs11(Text12, { children: [
+      /* @__PURE__ */ jsx13(Text13, { children: " " }),
+      /* @__PURE__ */ jsx13(Text13, { color: theme.dim, children: "It's tied to a secret key on this device. That's how your friends recognize" }),
+      /* @__PURE__ */ jsx13(Text13, { color: theme.dim, children: "you \u2013 even if your name or IP address changes. termchat, keyrace, termdrop and" }),
+      /* @__PURE__ */ jsx13(Text13, { color: theme.dim, children: "termhub share it, along with your friends. Every connection is end-to-end encrypted." }),
+      /* @__PURE__ */ jsx13(Text13, { children: " " }),
+      /* @__PURE__ */ jsxs12(Text13, { children: [
         "Press ",
-        /* @__PURE__ */ jsx12(Text12, { color: theme.accent, children: "enter" }),
+        /* @__PURE__ */ jsx13(Text13, { color: theme.accent, children: "enter" }),
         " to continue"
       ] })
-    ] }) : /* @__PURE__ */ jsxs11(Fragment6, { children: [
-      /* @__PURE__ */ jsx12(Text12, { bold: true, children: question }),
-      /* @__PURE__ */ jsx12(Text12, { color: theme.dim, children: "You can change it later with /name." }),
-      /* @__PURE__ */ jsx12(Text12, { children: " " }),
-      /* @__PURE__ */ jsx12(
+    ] });
+  } else if (picking) {
+    const current = colors[colorIndex];
+    body = /* @__PURE__ */ jsxs12(Fragment6, { children: [
+      /* @__PURE__ */ jsx13(Text13, { bold: true, children: "Pick your color" }),
+      /* @__PURE__ */ jsx13(Text13, { color: theme.dim, children: "Friends see your name in it, in every app. You can change it later." }),
+      /* @__PURE__ */ jsx13(Text13, { children: " " }),
+      /* @__PURE__ */ jsx13(Swatches, { colors, selected: colorIndex, width: boxWidth }),
+      /* @__PURE__ */ jsx13(Text13, { children: " " }),
+      /* @__PURE__ */ jsxs12(Text13, { children: [
+        "  ",
+        /* @__PURE__ */ jsx13(Text13, { bold: true, color: current.hex, children: name }),
+        /* @__PURE__ */ jsxs12(Text13, { color: theme.dim, children: [
+          " \xB7 ",
+          current.name
+        ] })
+      ] }),
+      /* @__PURE__ */ jsx13(Text13, { children: " " }),
+      /* @__PURE__ */ jsx13(Text13, { color: theme.dim, children: "\u2190\u2192 choose \xB7 enter confirm \xB7 esc back to the name" }),
+      error ? /* @__PURE__ */ jsx13(Text13, { color: theme.error, children: error }) : null
+    ] });
+  } else {
+    body = /* @__PURE__ */ jsxs12(Fragment6, { children: [
+      /* @__PURE__ */ jsx13(Text13, { bold: true, children: question }),
+      /* @__PURE__ */ jsxs12(Text13, { color: theme.dim, children: [
+        "You can change it later",
+        colors ? " in termhub" : " with /name",
+        "."
+      ] }),
+      /* @__PURE__ */ jsx13(Text13, { children: " " }),
+      /* @__PURE__ */ jsx13(
         InputBox,
         {
           state: editor,
@@ -7929,21 +8085,27 @@ function Onboarding({ logo, tagline, width, create, onDone, question = "What sho
           borderColor: theme.accent
         }
       ),
-      error ? /* @__PURE__ */ jsx12(Text12, { color: theme.error, children: error }) : null
-    ] })
+      error ? /* @__PURE__ */ jsx13(Text13, { color: theme.error, children: error }) : null
+    ] });
+  }
+  return /* @__PURE__ */ jsxs12(Box12, { flexDirection: "column", paddingX: 2, paddingY: 1, children: [
+    logo.map((l, i) => /* @__PURE__ */ jsx13(Text13, { color: theme.accent, children: l }, i)),
+    /* @__PURE__ */ jsx13(Text13, { color: theme.dim, children: tagline }),
+    /* @__PURE__ */ jsx13(Text13, { children: " " }),
+    body
   ] });
 }
 
 // src/ui/components/ModeDialog.tsx
-import { Box as Box12, Text as Text13, useInput as useInput7 } from "ink";
+import { Box as Box13, Text as Text14, useInput as useInput7 } from "ink";
 import { useState as useState8 } from "react";
-import { jsx as jsx13, jsxs as jsxs12 } from "react/jsx-runtime";
+import { jsx as jsx14, jsxs as jsxs13 } from "react/jsx-runtime";
 function modeDialog(title, initial, resolve) {
   return {
     kind: "custom",
     // border (2) + title + modes + help line
     height: 4 + MODES.length,
-    render: (width) => /* @__PURE__ */ jsx13(ModeDialog, { title, initial, resolve, width })
+    render: (width) => /* @__PURE__ */ jsx14(ModeDialog, { title, initial, resolve, width })
   };
 }
 function ModeDialog({ title, initial, resolve, width }) {
@@ -7969,35 +8131,35 @@ function ModeDialog({ title, initial, resolve, width }) {
     if (key.return) resolve({ mode, param: params[mode] });
   });
   const lengthLabel = (mode, param) => mode === "sprint" ? `${param}s` : mode === "race" ? `${param} words` : "";
-  return /* @__PURE__ */ jsxs12(DialogFrame, { width, children: [
-    /* @__PURE__ */ jsx13(Text13, { bold: true, wrap: "truncate-end", children: title }),
+  return /* @__PURE__ */ jsxs13(DialogFrame, { width, children: [
+    /* @__PURE__ */ jsx14(Text14, { bold: true, wrap: "truncate-end", children: title }),
     MODES.map((mode, i) => {
       const active = i === cursor;
       const list = PARAMS[mode];
       const value = params[mode];
       const idx = list.indexOf(value);
       const len = lengthLabel(mode, value);
-      return /* @__PURE__ */ jsxs12(Box12, { children: [
-        /* @__PURE__ */ jsx13(Box12, { width: 2, flexShrink: 0, children: /* @__PURE__ */ jsx13(Text13, { color: theme.accent, children: active ? icons.pointer : " " }) }),
-        /* @__PURE__ */ jsx13(Box12, { width: 14, flexShrink: 0, children: /* @__PURE__ */ jsx13(Text13, { bold: active, color: active ? theme.accent : void 0, children: MODE_LABEL[mode] }) }),
-        /* @__PURE__ */ jsx13(Box12, { width: 14, flexShrink: 0, children: len ? /* @__PURE__ */ jsxs12(Text13, { children: [
-          /* @__PURE__ */ jsx13(Text13, { color: active && idx > 0 ? theme.accent : theme.faint, children: "\u2039 " }),
-          /* @__PURE__ */ jsx13(Text13, { bold: active, children: len }),
-          /* @__PURE__ */ jsx13(Text13, { color: active && idx < list.length - 1 ? theme.accent : theme.faint, children: " \u203A" })
+      return /* @__PURE__ */ jsxs13(Box13, { children: [
+        /* @__PURE__ */ jsx14(Box13, { width: 2, flexShrink: 0, children: /* @__PURE__ */ jsx14(Text14, { color: theme.accent, children: active ? icons.pointer : " " }) }),
+        /* @__PURE__ */ jsx14(Box13, { width: 14, flexShrink: 0, children: /* @__PURE__ */ jsx14(Text14, { bold: active, color: active ? theme.accent : void 0, children: MODE_LABEL[mode] }) }),
+        /* @__PURE__ */ jsx14(Box13, { width: 14, flexShrink: 0, children: len ? /* @__PURE__ */ jsxs13(Text14, { children: [
+          /* @__PURE__ */ jsx14(Text14, { color: active && idx > 0 ? theme.accent : theme.faint, children: "\u2039 " }),
+          /* @__PURE__ */ jsx14(Text14, { bold: active, children: len }),
+          /* @__PURE__ */ jsx14(Text14, { color: active && idx < list.length - 1 ? theme.accent : theme.faint, children: " \u203A" })
         ] }) : null }),
-        /* @__PURE__ */ jsx13(Text13, { color: theme.dim, wrap: "truncate-end", children: MODE_BLURB[mode] })
+        /* @__PURE__ */ jsx14(Text14, { color: theme.dim, wrap: "truncate-end", children: MODE_BLURB[mode] })
       ] }, mode);
     }),
-    /* @__PURE__ */ jsx13(Text13, { color: theme.dim, wrap: "truncate-end", children: "\u2191\u2193 mode \xB7 \u2190\u2192 length \xB7 enter next \xB7 esc cancel" })
+    /* @__PURE__ */ jsx14(Text14, { color: theme.dim, wrap: "truncate-end", children: "\u2191\u2193 mode \xB7 \u2190\u2192 length \xB7 enter next \xB7 esc cancel" })
   ] });
 }
 
 // src/ui/screens/Race.tsx
-import { Box as Box16, Text as Text17, useInput as useInput8 } from "ink";
+import { Box as Box17, Text as Text18, useInput as useInput8 } from "ink";
 
 // ../termcore/src/ui/components/BigText.tsx
-import { Box as Box13, Text as Text14 } from "ink";
-import { jsx as jsx14 } from "react/jsx-runtime";
+import { Box as Box14, Text as Text15 } from "ink";
+import { jsx as jsx15 } from "react/jsx-runtime";
 var GLYPHS = {
   "3": ["\u2588\u2588\u2588\u2588\u2588\u2588\u2557 ", "\u255A\u2550\u2550\u2550\u2550\u2588\u2588\u2557", " \u2588\u2588\u2588\u2588\u2588\u2554\u255D", " \u255A\u2550\u2550\u2550\u2588\u2588\u2557", "\u2588\u2588\u2588\u2588\u2588\u2588\u2554\u255D", "\u255A\u2550\u2550\u2550\u2550\u2550\u255D "],
   "2": ["\u2588\u2588\u2588\u2588\u2588\u2588\u2557 ", "\u255A\u2550\u2550\u2550\u2550\u2588\u2588\u2557", " \u2588\u2588\u2588\u2588\u2588\u2554\u255D", "\u2588\u2588\u2554\u2550\u2550\u2550\u255D ", "\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557", "\u255A\u2550\u2550\u2550\u2550\u2550\u2550\u255D"],
@@ -8016,12 +8178,12 @@ function bigLines(text) {
   return rows.map((r) => r.trimEnd());
 }
 function BigText({ text, color, width }) {
-  return /* @__PURE__ */ jsx14(Box13, { flexDirection: "column", alignItems: "center", width, flexShrink: 0, children: bigLines(text).map((l, i) => /* @__PURE__ */ jsx14(Text14, { color, children: l }, i)) });
+  return /* @__PURE__ */ jsx15(Box14, { flexDirection: "column", alignItems: "center", width, flexShrink: 0, children: bigLines(text).map((l, i) => /* @__PURE__ */ jsx15(Text15, { color, children: l }, i)) });
 }
 
 // src/ui/components/ProgressBars.tsx
-import { Box as Box14, Text as Text15 } from "ink";
-import { jsx as jsx15, jsxs as jsxs13 } from "react/jsx-runtime";
+import { Box as Box15, Text as Text16 } from "ink";
+import { jsx as jsx16, jsxs as jsxs14 } from "react/jsx-runtime";
 var EMPTY = { chars: 0, words: 0, errors: 0, keys: 0, correctKeys: 0, idx: 0, status: "racing", ms: 0 };
 function barRows(game, myId, elapsed) {
   const e = game.engine;
@@ -8072,29 +8234,29 @@ function barRows(game, myId, elapsed) {
 function ProgressBars({ rows, width }) {
   const nameWidth = Math.min(16, Math.max(8, ...rows.map((r) => r.name.length + 2)));
   const barWidth = Math.max(8, width - nameWidth - 2 - 9 - 9);
-  return /* @__PURE__ */ jsx15(Box14, { flexDirection: "column", width, flexShrink: 0, children: rows.map((r) => {
+  return /* @__PURE__ */ jsx16(Box15, { flexDirection: "column", width, flexShrink: 0, children: rows.map((r) => {
     const filled = Math.round(r.fill * barWidth);
     const color = r.left ? theme.faint : r.isMe ? theme.accent : senderHex(r.id);
-    return /* @__PURE__ */ jsxs13(Box14, { width, children: [
-      /* @__PURE__ */ jsx15(Box14, { width: 2, flexShrink: 0, children: /* @__PURE__ */ jsx15(Text15, { color: theme.accent, children: r.isMe ? icons.pointer : " " }) }),
-      /* @__PURE__ */ jsx15(Box14, { width: nameWidth, flexShrink: 0, children: /* @__PURE__ */ jsx15(Text15, { color: r.left ? theme.faint : color, bold: r.isMe, wrap: "truncate-end", children: r.isMe ? "You" : r.name }) }),
-      /* @__PURE__ */ jsxs13(Text15, { children: [
-        /* @__PURE__ */ jsx15(Text15, { color, children: "\u2501".repeat(filled) }),
-        /* @__PURE__ */ jsx15(Text15, { color: theme.border, children: "\u2500".repeat(barWidth - filled) })
+    return /* @__PURE__ */ jsxs14(Box15, { width, children: [
+      /* @__PURE__ */ jsx16(Box15, { width: 2, flexShrink: 0, children: /* @__PURE__ */ jsx16(Text16, { color: theme.accent, children: r.isMe ? icons.pointer : " " }) }),
+      /* @__PURE__ */ jsx16(Box15, { width: nameWidth, flexShrink: 0, children: /* @__PURE__ */ jsx16(Text16, { color: r.left ? theme.faint : color, bold: r.isMe, wrap: "truncate-end", children: r.isMe ? "You" : r.name }) }),
+      /* @__PURE__ */ jsxs14(Text16, { children: [
+        /* @__PURE__ */ jsx16(Text16, { color, children: "\u2501".repeat(filled) }),
+        /* @__PURE__ */ jsx16(Text16, { color: theme.border, children: "\u2500".repeat(barWidth - filled) })
       ] }),
-      /* @__PURE__ */ jsxs13(Box14, { width: 9, flexShrink: 0, justifyContent: "flex-end", children: [
-        /* @__PURE__ */ jsx15(Text15, { color: r.isMe ? void 0 : theme.dim, bold: r.isMe, children: Math.round(r.wpm) }),
-        /* @__PURE__ */ jsx15(Text15, { color: theme.faint, children: " wpm" })
+      /* @__PURE__ */ jsxs14(Box15, { width: 9, flexShrink: 0, justifyContent: "flex-end", children: [
+        /* @__PURE__ */ jsx16(Text16, { color: r.isMe ? void 0 : theme.dim, bold: r.isMe, children: Math.round(r.wpm) }),
+        /* @__PURE__ */ jsx16(Text16, { color: theme.faint, children: " wpm" })
       ] }),
-      /* @__PURE__ */ jsx15(Box14, { width: 9, flexShrink: 0, paddingLeft: 1, children: /* @__PURE__ */ jsx15(Text15, { color: r.labelColor, wrap: "truncate-end", children: r.label }) })
+      /* @__PURE__ */ jsx16(Box15, { width: 9, flexShrink: 0, paddingLeft: 1, children: /* @__PURE__ */ jsx16(Text16, { color: r.labelColor, wrap: "truncate-end", children: r.label }) })
     ] }, r.id);
   }) });
 }
 
 // src/ui/components/TypingText.tsx
 import chalk4 from "chalk";
-import { Box as Box15, Text as Text16 } from "ink";
-import { jsx as jsx16 } from "react/jsx-runtime";
+import { Box as Box16, Text as Text17 } from "ink";
+import { jsx as jsx17 } from "react/jsx-runtime";
 var TEXT_LINES = 4;
 function layoutWords(engine, width) {
   const lines = [[]];
@@ -8171,11 +8333,11 @@ function TypingText({ engine, width, active }) {
       }).join("").replace(/ $/, "")
     );
   }
-  return /* @__PURE__ */ jsx16(Box15, { flexDirection: "column", width, flexShrink: 0, children: out.map((l, i) => /* @__PURE__ */ jsx16(Text16, { wrap: "truncate-end", children: l || " " }, i)) });
+  return /* @__PURE__ */ jsx17(Box16, { flexDirection: "column", width, flexShrink: 0, children: out.map((l, i) => /* @__PURE__ */ jsx17(Text17, { wrap: "truncate-end", children: l || " " }, i)) });
 }
 
 // src/ui/screens/Race.tsx
-import { Fragment as Fragment7, jsx as jsx17, jsxs as jsxs14 } from "react/jsx-runtime";
+import { Fragment as Fragment7, jsx as jsx18, jsxs as jsxs15 } from "react/jsx-runtime";
 var AREA = Math.max(BIG_HEIGHT, TEXT_LINES + 2);
 var GO_MS = 900;
 function WallBar({ gap, wpm, width, startsIn }) {
@@ -8185,14 +8347,14 @@ function WallBar({ gap, wpm, width, startsIn }) {
   const filled = Math.round(danger * barWidth);
   const color = danger > 0.75 ? theme.error : danger > 0.45 ? theme.warning : theme.success;
   const ahead = words >= 1 ? `you're ${Math.floor(words)} ${Math.floor(words) === 1 ? "word" : "words"} ahead` : "it's right behind you!";
-  return /* @__PURE__ */ jsxs14(Text17, { wrap: "truncate-end", children: [
-    /* @__PURE__ */ jsx17(Text17, { color: theme.dim, children: "wall " }),
-    /* @__PURE__ */ jsx17(Text17, { bold: true, children: wpm ? `${wpm} wpm` : "waiting" }),
-    /* @__PURE__ */ jsx17(Text17, { color: theme.faint, children: " \u2595" }),
-    /* @__PURE__ */ jsx17(Text17, { color, children: "\u2588".repeat(filled) }),
-    /* @__PURE__ */ jsx17(Text17, { color: theme.border, children: "\u2591".repeat(barWidth - filled) }),
-    /* @__PURE__ */ jsx17(Text17, { color: theme.faint, children: "\u258F " }),
-    /* @__PURE__ */ jsx17(Text17, { color: wpm ? color : theme.dim, children: wpm ? ahead : `starts in ${Math.ceil(startsIn / 1e3)}s` })
+  return /* @__PURE__ */ jsxs15(Text18, { wrap: "truncate-end", children: [
+    /* @__PURE__ */ jsx18(Text18, { color: theme.dim, children: "wall " }),
+    /* @__PURE__ */ jsx18(Text18, { bold: true, children: wpm ? `${wpm} wpm` : "waiting" }),
+    /* @__PURE__ */ jsx18(Text18, { color: theme.faint, children: " \u2595" }),
+    /* @__PURE__ */ jsx18(Text18, { color, children: "\u2588".repeat(filled) }),
+    /* @__PURE__ */ jsx18(Text18, { color: theme.border, children: "\u2591".repeat(barWidth - filled) }),
+    /* @__PURE__ */ jsx18(Text18, { color: theme.faint, children: "\u258F " }),
+    /* @__PURE__ */ jsx18(Text18, { color: wpm ? color : theme.dim, children: wpm ? ahead : `starts in ${Math.ceil(startsIn / 1e3)}s` })
   ] });
 }
 function Race({ store, game, width, height, actions, dialog }) {
@@ -8227,27 +8389,27 @@ function Race({ store, game, width, height, actions, dialog }) {
   if (mode === "sprint") parts.push(`${clockDown(limit - Math.max(0, elapsed))} left`);
   else if (mode === "race") parts.push(`${e.correctWords}/${param} words`, duration(Math.max(0, elapsed)));
   else parts.push(`${duration(Math.max(0, elapsed))} survived`);
-  const statLine = /* @__PURE__ */ jsxs14(Text17, { wrap: "truncate-end", children: [
-    /* @__PURE__ */ jsx17(Text17, { bold: true, children: parts[0] }),
-    parts[1] ? /* @__PURE__ */ jsxs14(Text17, { color: theme.dim, children: [
+  const statLine = /* @__PURE__ */ jsxs15(Text18, { wrap: "truncate-end", children: [
+    /* @__PURE__ */ jsx18(Text18, { bold: true, children: parts[0] }),
+    parts[1] ? /* @__PURE__ */ jsxs15(Text18, { color: theme.dim, children: [
       " \xB7 ",
       parts[1]
     ] }) : null,
-    /* @__PURE__ */ jsx17(Text17, { color: theme.faint, children: " \xB7 " }),
-    /* @__PURE__ */ jsx17(Text17, { bold: true, color: theme.accent, children: wpm }),
-    /* @__PURE__ */ jsxs14(Text17, { color: theme.dim, children: [
+    /* @__PURE__ */ jsx18(Text18, { color: theme.faint, children: " \xB7 " }),
+    /* @__PURE__ */ jsx18(Text18, { bold: true, color: theme.accent, children: wpm }),
+    /* @__PURE__ */ jsxs15(Text18, { color: theme.dim, children: [
       " wpm \xB7 ",
       pct(e.accuracy()),
       " acc"
     ] }),
-    mode !== "race" ? /* @__PURE__ */ jsxs14(Text17, { color: theme.dim, children: [
+    mode !== "race" ? /* @__PURE__ */ jsxs15(Text18, { color: theme.dim, children: [
       " ",
       "\xB7 ",
       e.correctWords,
       " ",
       e.correctWords === 1 ? "word" : "words"
     ] }) : null,
-    mode !== "sudden" ? /* @__PURE__ */ jsxs14(Text17, { color: e.errors ? theme.error : theme.dim, children: [
+    mode !== "sudden" ? /* @__PURE__ */ jsxs15(Text18, { color: e.errors ? theme.error : theme.dim, children: [
       " ",
       "\xB7 ",
       e.errors,
@@ -8258,40 +8420,40 @@ function Race({ store, game, width, height, actions, dialog }) {
   let area;
   if (e.status === "countdown") {
     const n = Math.ceil(-elapsed / 1e3);
-    area = /* @__PURE__ */ jsx17(BigText, { text: String(Math.max(1, Math.min(3, n))), color: theme.accent, width: width - 2 });
+    area = /* @__PURE__ */ jsx18(BigText, { text: String(Math.max(1, Math.min(3, n))), color: theme.accent, width: width - 2 });
   } else if (e.ended) {
     const waiting = game.role !== "solo" && game.racers.some((r) => !r.left && r.id !== me && r.progress?.status === "racing");
     const headline = e.status === "out" ? e.outReason === "wall" ? `${icons.error} The wall caught you after ${duration(e.endedAt ?? 0)}` : `${icons.error} Out \u2013 a typo after ${duration(e.endedAt ?? 0)}` : mode === "race" && !e.completed ? `Time's up \u2013 ${e.correctWords} of ${param} words` : `${icons.flag} Finished \u2013 ${wpm} wpm`;
-    area = /* @__PURE__ */ jsxs14(Box16, { flexDirection: "column", alignItems: "center", width: width - 2, children: [
-      /* @__PURE__ */ jsx17(Text17, { bold: true, color: e.status === "out" ? theme.error : theme.success, children: headline }),
-      /* @__PURE__ */ jsx17(Text17, { color: theme.dim, children: waiting ? "Waiting for the others \u2026" : "Tallying the results \u2026" })
+    area = /* @__PURE__ */ jsxs15(Box17, { flexDirection: "column", alignItems: "center", width: width - 2, children: [
+      /* @__PURE__ */ jsx18(Text18, { bold: true, color: e.status === "out" ? theme.error : theme.success, children: headline }),
+      /* @__PURE__ */ jsx18(Text18, { color: theme.dim, children: waiting ? "Waiting for the others \u2026" : "Tallying the results \u2026" })
     ] });
   } else {
-    area = /* @__PURE__ */ jsx17(TypingText, { engine: e, width: textWidth, active: !dialog });
+    area = /* @__PURE__ */ jsx18(TypingText, { engine: e, width: textWidth, active: !dialog });
   }
-  return /* @__PURE__ */ jsxs14(Box16, { flexDirection: "column", width, height, children: [
-    /* @__PURE__ */ jsxs14(Box16, { flexDirection: "column", paddingX: 1, flexGrow: 1, overflow: "hidden", children: [
-      /* @__PURE__ */ jsxs14(Box16, { width: width - 2, flexShrink: 0, children: [
-        /* @__PURE__ */ jsx17(Box16, { flexGrow: 1, children: /* @__PURE__ */ jsxs14(Text17, { color: theme.dim, bold: true, children: [
+  return /* @__PURE__ */ jsxs15(Box17, { flexDirection: "column", width, height, children: [
+    /* @__PURE__ */ jsxs15(Box17, { flexDirection: "column", paddingX: 1, flexGrow: 1, overflow: "hidden", children: [
+      /* @__PURE__ */ jsxs15(Box17, { width: width - 2, flexShrink: 0, children: [
+        /* @__PURE__ */ jsx18(Box17, { flexGrow: 1, children: /* @__PURE__ */ jsxs15(Text18, { color: theme.dim, bold: true, children: [
           settingsLabel(game.settings).toUpperCase(),
           game.role === "solo" ? " \xB7 SOLO" : ""
         ] }) }),
-        showGo ? /* @__PURE__ */ jsx17(Text17, { color: theme.accent, bold: true, children: "GO!" }) : null
+        showGo ? /* @__PURE__ */ jsx18(Text18, { color: theme.accent, bold: true, children: "GO!" }) : null
       ] }),
-      /* @__PURE__ */ jsx17(Text17, { children: " " }),
-      game.role !== "solo" ? /* @__PURE__ */ jsxs14(Fragment7, { children: [
-        /* @__PURE__ */ jsx17(ProgressBars, { rows, width: width - 2 }),
-        /* @__PURE__ */ jsx17(Text17, { children: " " })
+      /* @__PURE__ */ jsx18(Text18, { children: " " }),
+      game.role !== "solo" ? /* @__PURE__ */ jsxs15(Fragment7, { children: [
+        /* @__PURE__ */ jsx18(ProgressBars, { rows, width: width - 2 }),
+        /* @__PURE__ */ jsx18(Text18, { children: " " })
       ] }) : null,
-      /* @__PURE__ */ jsx17(Box16, { height: AREA, flexDirection: "column", justifyContent: "center", alignItems: "center", flexShrink: 0, children: area }),
-      /* @__PURE__ */ jsx17(Text17, { children: " " }),
-      /* @__PURE__ */ jsxs14(Box16, { flexDirection: "column", alignItems: "center", width: width - 2, flexShrink: 0, children: [
-        e.status === "countdown" ? /* @__PURE__ */ jsx17(Text17, { color: theme.dim, children: "get ready \u2026" }) : statLine,
-        mode === "sudden" && e.status === "racing" ? /* @__PURE__ */ jsx17(WallBar, { gap: e.wallGap(), wpm: wallWpm(elapsed), width: width - 2, startsIn: WALL.graceMs - elapsed }) : null
+      /* @__PURE__ */ jsx18(Box17, { height: AREA, flexDirection: "column", justifyContent: "center", alignItems: "center", flexShrink: 0, children: area }),
+      /* @__PURE__ */ jsx18(Text18, { children: " " }),
+      /* @__PURE__ */ jsxs15(Box17, { flexDirection: "column", alignItems: "center", width: width - 2, flexShrink: 0, children: [
+        e.status === "countdown" ? /* @__PURE__ */ jsx18(Text18, { color: theme.dim, children: "get ready \u2026" }) : statLine,
+        mode === "sudden" && e.status === "racing" ? /* @__PURE__ */ jsx18(WallBar, { gap: e.wallGap(), wpm: wallWpm(elapsed), width: width - 2, startsIn: WALL.graceMs - elapsed }) : null
       ] })
     ] }),
-    dialog ? /* @__PURE__ */ jsx17(Dialog, { spec: dialog, width }) : null,
-    /* @__PURE__ */ jsx17(
+    dialog ? /* @__PURE__ */ jsx18(Dialog, { spec: dialog, width }) : null,
+    /* @__PURE__ */ jsx18(
       Footer,
       {
         hints: e.ended ? ["esc leave"] : ["type the words", "space next word", "backspace fix", "esc give up"],
@@ -8303,11 +8465,11 @@ function Race({ store, game, width, height, actions, dialog }) {
 }
 
 // src/ui/screens/Results.tsx
-import { Box as Box17, Text as Text18, useInput as useInput9 } from "ink";
-import { Fragment as Fragment8, jsx as jsx18, jsxs as jsxs15 } from "react/jsx-runtime";
+import { Box as Box18, Text as Text19, useInput as useInput9 } from "ink";
+import { Fragment as Fragment8, jsx as jsx19, jsxs as jsxs16 } from "react/jsx-runtime";
 var MEDALS = ["\u{1F947}", "\u{1F948}", "\u{1F949}"];
 function Cell({ w, children, color, bold, right = true }) {
-  return /* @__PURE__ */ jsx18(Box17, { width: w, flexShrink: 0, justifyContent: right ? "flex-end" : "flex-start", children: /* @__PURE__ */ jsx18(Text18, { color, bold, wrap: "truncate-end", children }) });
+  return /* @__PURE__ */ jsx19(Box18, { width: w, flexShrink: 0, justifyContent: right ? "flex-end" : "flex-start", children: /* @__PURE__ */ jsx19(Text19, { color, bold, wrap: "truncate-end", children }) });
 }
 function Results({ store, game, width, height }) {
   const isHost = game.role === "host";
@@ -8329,16 +8491,16 @@ function Results({ store, game, width, height }) {
     if (key.return || key.escape) store.games.dismiss();
   });
   if (game.phase === "closed") {
-    return /* @__PURE__ */ jsxs15(Box17, { flexDirection: "column", width, height, children: [
-      /* @__PURE__ */ jsxs15(Box17, { flexDirection: "column", paddingX: 2, paddingY: 1, flexGrow: 1, children: [
-        /* @__PURE__ */ jsxs15(Text18, { color: theme.error, bold: true, children: [
+    return /* @__PURE__ */ jsxs16(Box18, { flexDirection: "column", width, height, children: [
+      /* @__PURE__ */ jsxs16(Box18, { flexDirection: "column", paddingX: 2, paddingY: 1, flexGrow: 1, children: [
+        /* @__PURE__ */ jsxs16(Text19, { color: theme.error, bold: true, children: [
           icons.error,
           " ",
           game.closedReason ?? "The race was called off"
         ] }),
-        /* @__PURE__ */ jsx18(Text18, { color: theme.dim, children: "Nothing was recorded." })
+        /* @__PURE__ */ jsx19(Text19, { color: theme.dim, children: "Nothing was recorded." })
       ] }),
-      /* @__PURE__ */ jsx18(Footer, { hints: ["enter back to the dashboard"], toast: store.toast, width })
+      /* @__PURE__ */ jsx19(Footer, { hints: ["enter back to the dashboard"], toast: store.toast, width })
     ] });
   }
   const results = game.results ?? [];
@@ -8350,76 +8512,76 @@ function Results({ store, game, width, height }) {
   const mine = results.find((r) => r.id === me);
   const statusText2 = (r) => r.status === "left" ? `${icons.left} left` : mode === "race" && !r.completed ? "not finished" : mode === "sudden" && r.status === "finished" ? "cleared" : "";
   const hints = rematch ? ["enter join the rematch", "x decline", "esc back"] : isHost ? ["r rematch", "enter back"] : game.role === "solo" ? ["r again", "enter back"] : ["enter back"];
-  return /* @__PURE__ */ jsxs15(Box17, { flexDirection: "column", width, height, children: [
-    /* @__PURE__ */ jsxs15(Box17, { flexDirection: "column", paddingX: 1, flexGrow: 1, overflow: "hidden", children: [
-      /* @__PURE__ */ jsxs15(Text18, { wrap: "truncate-end", children: [
-        /* @__PURE__ */ jsx18(Text18, { color: theme.dim, bold: true, children: "RESULTS" }),
-        /* @__PURE__ */ jsx18(Text18, { color: theme.faint, children: " \xB7 " }),
-        /* @__PURE__ */ jsx18(Text18, { bold: true, children: settingsLabel(game.settings) }),
-        solo ? /* @__PURE__ */ jsx18(Text18, { color: theme.dim, children: " \xB7 solo" }) : null
+  return /* @__PURE__ */ jsxs16(Box18, { flexDirection: "column", width, height, children: [
+    /* @__PURE__ */ jsxs16(Box18, { flexDirection: "column", paddingX: 1, flexGrow: 1, overflow: "hidden", children: [
+      /* @__PURE__ */ jsxs16(Text19, { wrap: "truncate-end", children: [
+        /* @__PURE__ */ jsx19(Text19, { color: theme.dim, bold: true, children: "RESULTS" }),
+        /* @__PURE__ */ jsx19(Text19, { color: theme.faint, children: " \xB7 " }),
+        /* @__PURE__ */ jsx19(Text19, { bold: true, children: settingsLabel(game.settings) }),
+        solo ? /* @__PURE__ */ jsx19(Text19, { color: theme.dim, children: " \xB7 solo" }) : null
       ] }),
-      /* @__PURE__ */ jsx18(Text18, { children: " " }),
-      mine && !solo ? /* @__PURE__ */ jsxs15(Fragment8, { children: [
-        /* @__PURE__ */ jsx18(Text18, { bold: true, color: mine.place === 1 && mine.status !== "left" ? theme.success : void 0, children: mine.place === 1 && mine.status !== "left" ? `${icons.flag} You won!` : `You placed ${ordinal(mine.place)} of ${results.length}` }),
-        /* @__PURE__ */ jsx18(Text18, { children: " " })
+      /* @__PURE__ */ jsx19(Text19, { children: " " }),
+      mine && !solo ? /* @__PURE__ */ jsxs16(Fragment8, { children: [
+        /* @__PURE__ */ jsx19(Text19, { bold: true, color: mine.place === 1 && mine.status !== "left" ? theme.success : void 0, children: mine.place === 1 && mine.status !== "left" ? `${icons.flag} You won!` : `You placed ${ordinal(mine.place)} of ${results.length}` }),
+        /* @__PURE__ */ jsx19(Text19, { children: " " })
       ] }) : null,
-      /* @__PURE__ */ jsxs15(Box17, { children: [
-        /* @__PURE__ */ jsx18(Cell, { w: 8, right: false, color: theme.faint, children: "" }),
-        /* @__PURE__ */ jsx18(Cell, { w: nameW, right: false, color: theme.faint, children: "PLAYER" }),
-        /* @__PURE__ */ jsx18(Cell, { w: 6, color: theme.faint, children: "WPM" }),
-        /* @__PURE__ */ jsx18(Cell, { w: 7, color: theme.faint, children: "ACC" }),
-        /* @__PURE__ */ jsx18(Cell, { w: 8, color: theme.faint, children: "WORDS" }),
-        mode !== "sudden" ? /* @__PURE__ */ jsx18(Cell, { w: 8, color: theme.faint, children: "ERRORS" }) : null,
-        showTime ? /* @__PURE__ */ jsx18(Cell, { w: 10, color: theme.faint, children: timeLabel }) : null
+      /* @__PURE__ */ jsxs16(Box18, { children: [
+        /* @__PURE__ */ jsx19(Cell, { w: 8, right: false, color: theme.faint, children: "" }),
+        /* @__PURE__ */ jsx19(Cell, { w: nameW, right: false, color: theme.faint, children: "PLAYER" }),
+        /* @__PURE__ */ jsx19(Cell, { w: 6, color: theme.faint, children: "WPM" }),
+        /* @__PURE__ */ jsx19(Cell, { w: 7, color: theme.faint, children: "ACC" }),
+        /* @__PURE__ */ jsx19(Cell, { w: 8, color: theme.faint, children: "WORDS" }),
+        mode !== "sudden" ? /* @__PURE__ */ jsx19(Cell, { w: 8, color: theme.faint, children: "ERRORS" }) : null,
+        showTime ? /* @__PURE__ */ jsx19(Cell, { w: 10, color: theme.faint, children: timeLabel }) : null
       ] }),
       results.map((r) => {
         const isMe = r.id === me;
         const color = r.status === "left" ? theme.faint : isMe ? theme.accent : senderHex(r.id);
         const medal = r.status !== "left" && !solo ? MEDALS[r.place - 1] ?? "  " : "  ";
-        return /* @__PURE__ */ jsxs15(Box17, { children: [
-          /* @__PURE__ */ jsx18(Box17, { width: 8, flexShrink: 0, children: /* @__PURE__ */ jsxs15(Text18, { children: [
+        return /* @__PURE__ */ jsxs16(Box18, { children: [
+          /* @__PURE__ */ jsx19(Box18, { width: 8, flexShrink: 0, children: /* @__PURE__ */ jsxs16(Text19, { children: [
             medal,
             " ",
-            /* @__PURE__ */ jsx18(Text18, { color: theme.dim, children: solo ? "" : ordinal(r.place) })
+            /* @__PURE__ */ jsx19(Text19, { color: theme.dim, children: solo ? "" : ordinal(r.place) })
           ] }) }),
-          /* @__PURE__ */ jsx18(Cell, { w: nameW, right: false, color, bold: isMe, children: isMe ? "You" : r.name }),
-          /* @__PURE__ */ jsx18(Cell, { w: 6, bold: true, color: r.status === "left" ? theme.faint : void 0, children: String(Math.round(r.wpm)) }),
-          /* @__PURE__ */ jsx18(Cell, { w: 7, color: theme.dim, children: pct(r.acc) }),
-          /* @__PURE__ */ jsx18(Cell, { w: 8, color: theme.dim, children: String(r.words) }),
-          mode !== "sudden" ? /* @__PURE__ */ jsx18(Cell, { w: 8, color: r.errors ? theme.error : theme.dim, children: String(r.errors) }) : null,
-          showTime ? /* @__PURE__ */ jsx18(Cell, { w: 10, color: theme.dim, children: mode === "race" && !r.completed ? "\u2013" : duration(r.timeMs) }) : null,
-          /* @__PURE__ */ jsx18(Box17, { marginLeft: 2, flexShrink: 1, minWidth: 0, children: /* @__PURE__ */ jsxs15(Text18, { wrap: "truncate-end", children: [
-            isMe && game.newBest ? /* @__PURE__ */ jsxs15(Text18, { color: theme.warning, bold: true, children: [
+          /* @__PURE__ */ jsx19(Cell, { w: nameW, right: false, color, bold: isMe, children: isMe ? "You" : r.name }),
+          /* @__PURE__ */ jsx19(Cell, { w: 6, bold: true, color: r.status === "left" ? theme.faint : void 0, children: String(Math.round(r.wpm)) }),
+          /* @__PURE__ */ jsx19(Cell, { w: 7, color: theme.dim, children: pct(r.acc) }),
+          /* @__PURE__ */ jsx19(Cell, { w: 8, color: theme.dim, children: String(r.words) }),
+          mode !== "sudden" ? /* @__PURE__ */ jsx19(Cell, { w: 8, color: r.errors ? theme.error : theme.dim, children: String(r.errors) }) : null,
+          showTime ? /* @__PURE__ */ jsx19(Cell, { w: 10, color: theme.dim, children: mode === "race" && !r.completed ? "\u2013" : duration(r.timeMs) }) : null,
+          /* @__PURE__ */ jsx19(Box18, { marginLeft: 2, flexShrink: 1, minWidth: 0, children: /* @__PURE__ */ jsxs16(Text19, { wrap: "truncate-end", children: [
+            isMe && game.newBest ? /* @__PURE__ */ jsxs16(Text19, { color: theme.warning, bold: true, children: [
               icons.star,
               " new best",
               " "
             ] }) : null,
-            /* @__PURE__ */ jsx18(Text18, { color: theme.faint, children: statusText2(r) })
+            /* @__PURE__ */ jsx19(Text19, { color: theme.faint, children: statusText2(r) })
           ] }) })
         ] }, r.id);
       }),
-      rematch ? /* @__PURE__ */ jsxs15(Fragment8, { children: [
-        /* @__PURE__ */ jsx18(Text18, { children: " " }),
-        /* @__PURE__ */ jsxs15(Text18, { wrap: "truncate-end", children: [
-          /* @__PURE__ */ jsxs15(Text18, { color: theme.accent, children: [
+      rematch ? /* @__PURE__ */ jsxs16(Fragment8, { children: [
+        /* @__PURE__ */ jsx19(Text19, { children: " " }),
+        /* @__PURE__ */ jsxs16(Text19, { wrap: "truncate-end", children: [
+          /* @__PURE__ */ jsxs16(Text19, { color: theme.accent, children: [
             icons.request,
             " "
           ] }),
-          /* @__PURE__ */ jsx18(Text18, { bold: true, children: rematch.hostName }),
-          /* @__PURE__ */ jsxs15(Text18, { children: [
+          /* @__PURE__ */ jsx19(Text19, { bold: true, children: rematch.hostName }),
+          /* @__PURE__ */ jsxs16(Text19, { children: [
             " wants a rematch \u2013 ",
             settingsPhrase(rematch.settings)
           ] }),
-          /* @__PURE__ */ jsx18(Text18, { color: theme.dim, children: " \xB7 enter join \xB7 x decline" })
+          /* @__PURE__ */ jsx19(Text19, { color: theme.dim, children: " \xB7 enter join \xB7 x decline" })
         ] })
       ] }) : null
     ] }),
-    /* @__PURE__ */ jsx18(Footer, { hints, toast: store.toast, width })
+    /* @__PURE__ */ jsx19(Footer, { hints, toast: store.toast, width })
   ] });
 }
 
 // src/ui/App.tsx
-import { jsx as jsx19, jsxs as jsxs16 } from "react/jsx-runtime";
+import { jsx as jsx20, jsxs as jsxs17 } from "react/jsx-runtime";
 function Root({
   paths,
   options,
@@ -8460,7 +8622,7 @@ function Root({
   }, [phase.name]);
   const height = Math.max(10, rows - 1);
   if (phase.name === "onboarding") {
-    return /* @__PURE__ */ jsx19(
+    return /* @__PURE__ */ jsx20(
       Onboarding,
       {
         logo: LOGO_SMALL,
@@ -8472,16 +8634,16 @@ function Root({
     );
   }
   if (phase.name === "starting") {
-    return /* @__PURE__ */ jsx19(Box18, { paddingX: 2, paddingY: 1, children: /* @__PURE__ */ jsx19(Text19, { color: theme.dim, children: "Starting keyrace \u2026" }) });
+    return /* @__PURE__ */ jsx20(Box19, { paddingX: 2, paddingY: 1, children: /* @__PURE__ */ jsx20(Text20, { color: theme.dim, children: "Starting keyrace \u2026" }) });
   }
   if (phase.name === "error") {
-    return /* @__PURE__ */ jsxs16(Box18, { paddingX: 2, paddingY: 1, flexDirection: "column", children: [
-      /* @__PURE__ */ jsx19(Text19, { color: theme.error, bold: true, children: "keyrace could not start" }),
-      /* @__PURE__ */ jsx19(Text19, { children: phase.message }),
-      /* @__PURE__ */ jsx19(Text19, { color: theme.dim, children: "ctrl+c to quit" })
+    return /* @__PURE__ */ jsxs17(Box19, { paddingX: 2, paddingY: 1, flexDirection: "column", children: [
+      /* @__PURE__ */ jsx20(Text20, { color: theme.error, bold: true, children: "keyrace could not start" }),
+      /* @__PURE__ */ jsx20(Text20, { children: phase.message }),
+      /* @__PURE__ */ jsx20(Text20, { color: theme.dim, children: "ctrl+c to quit" })
     ] });
   }
-  return /* @__PURE__ */ jsx19(Main, { store: phase.store, width: columns, height, rows, quit });
+  return /* @__PURE__ */ jsx20(Main, { store: phase.store, width: columns, height, rows, quit });
 }
 function Main({ store, width, height, rows, quit }) {
   useStoreVersion(store);
@@ -8559,15 +8721,15 @@ function Main({ store, width, height, rows, quit }) {
   const game = store.games.game;
   let body;
   if (game && (game.phase === "joining" || game.phase === "lobby")) {
-    body = /* @__PURE__ */ jsx19(Lobby, { store, game, width, height: bodyHeight, actions, dialog });
+    body = /* @__PURE__ */ jsx20(Lobby, { store, game, width, height: bodyHeight, actions, dialog });
   } else if (game && game.phase === "race") {
-    body = /* @__PURE__ */ jsx19(Race, { store, game, width, height: bodyHeight, actions, dialog });
+    body = /* @__PURE__ */ jsx20(Race, { store, game, width, height: bodyHeight, actions, dialog });
   } else if (game) {
-    body = /* @__PURE__ */ jsx19(Results, { store, game, width, height: bodyHeight });
+    body = /* @__PURE__ */ jsx20(Results, { store, game, width, height: bodyHeight });
   } else if (panel) {
-    body = /* @__PURE__ */ jsx19(Panel, { text: panel, width, height: bodyHeight, onClose: () => setPanel(null) });
+    body = /* @__PURE__ */ jsx20(Panel, { text: panel, width, height: bodyHeight, onClose: () => setPanel(null) });
   } else {
-    body = /* @__PURE__ */ jsx19(
+    body = /* @__PURE__ */ jsx20(
       Dashboard,
       {
         store,
@@ -8582,8 +8744,8 @@ function Main({ store, width, height, rows, quit }) {
       }
     );
   }
-  return /* @__PURE__ */ jsxs16(Box18, { flexDirection: "column", width, height, children: [
-    /* @__PURE__ */ jsx19(
+  return /* @__PURE__ */ jsxs17(Box19, { flexDirection: "column", width, height, children: [
+    /* @__PURE__ */ jsx20(
       Header,
       {
         app: "keyrace",
@@ -8600,7 +8762,7 @@ function Main({ store, width, height, rows, quit }) {
 }
 
 // src/cli.tsx
-import { jsx as jsx20 } from "react/jsx-runtime";
+import { jsx as jsx21 } from "react/jsx-runtime";
 var HELP = `keyrace \u2013 multiplayer typing races for your local network
 
 Usage: keyrace [options]
@@ -8759,7 +8921,7 @@ keyrace crashed: ${err instanceof Error ? err.stack ?? err.message : String(err)
   process.on("unhandledRejection", crash);
   for (const sig of ["SIGTERM", "SIGHUP"]) process.on(sig, () => process.exit(0));
   const app = render(
-    /* @__PURE__ */ jsx20(Root, { paths, options: { port, discovery: !values["no-discovery"], debug: values.debug }, notice }),
+    /* @__PURE__ */ jsx21(Root, { paths, options: { port, discovery: !values["no-discovery"], debug: values.debug }, notice }),
     { exitOnCtrlC: false, patchConsole: true, stdin: new MouseFilterStdin(process.stdin) }
   );
   app.waitUntilExit().then(
