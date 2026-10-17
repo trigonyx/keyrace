@@ -188,6 +188,7 @@ it), Sudden Death by survival time. A new one is marked `★ new best` in the re
 
 ## On macOS
 
+- **Friends without keyrace open:** a friend who only has termhub, termchat or termdrop open shows up as `◌ in termhub` and can be invited all the same: they see `keyrace · Alice invites you to a 60s sprint` where they are, and once they open keyrace the invite is waiting. When the lobby closes or the race starts, the notice is taken back. Invites you get show up in your other open apps too.
 - **Notifications:** a system banner appears when a friend invites you while the terminal window is in the background. Toggle with `/notifications on|off`. It needs a terminal that reports focus (Terminal.app, iTerm2).
 - Works in Terminal.app and iTerm2 from 60 columns on; below 84 columns the stats move under the list, and narrow or short windows get a compact logo.
 

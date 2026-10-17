@@ -1,6 +1,7 @@
 import { Toasts, type NoteKind, type Toast } from 'termcore/app/toasts';
 import { displayName, type ContactOf } from 'termcore/friends/book';
 import { appendLog, FriendNet, type FriendEvent } from 'termcore/friends/net';
+import { noticeLine } from 'termcore/friends/notices';
 import type { Status } from 'termcore/friends/profile';
 import type { ContactState } from 'termcore/friends/state';
 import type { DiscoveredPeer, DiscoveryOptions } from 'termcore/net/discovery';
@@ -41,6 +42,8 @@ export interface FriendView extends Contact {
   away: boolean;
   /** in a countdown or race right now */
   racing: boolean;
+  /** not online in keyrace, but in these apps of theirs (an invite reaches them there) */
+  elsewhere: string[];
   /** their status (only while connected) */
   status: Status;
   statusMsg?: string;
@@ -56,6 +59,9 @@ export interface DashboardData {
   /** keyrace users on the network who aren't friends yet */
   nearby: DiscoveredPeer[];
 }
+
+/** How long an invite as a notice is worth delivering. */
+const INVITE_NOTICE_TTL = 15 * 60_000;
 
 const FRIEND_ORDER: Record<ContactState, number> = { accepted: 0, outgoing: 1, declined: 2, incoming: 3, blocked: 4 };
 
@@ -73,6 +79,7 @@ export class AppStore {
   private readonly toasts: Toasts;
   private listeners = new Set<() => void>();
   private notifyQueued = false;
+  private started = false;
   version = 0;
   /** Newer version on GitHub (checked by the UI at launch), shown in the header. */
   updateAvailable: string | null = null;
@@ -99,6 +106,9 @@ export class AppStore {
         event: (e) => this.onEvent(e),
         message: (s, m) => this.games.onWire(s.peerId, m),
         offline: (id) => this.games.onPeerOffline(id),
+        session: (s) => this.games.onPeerOnline(s.peerId),
+        // invites that came as notices: the real one follows once the host's keyrace connects
+        takeNotices: () => {},
         presenceExtra: () => (this.games.racing ? { racing: true } : {}),
         knowsId: (id) => this.results.knows(id),
         rekey: (oldId, newId) => this.results.rekey(oldId, newId),
@@ -112,6 +122,12 @@ export class AppStore {
       me: () => ({ id: this.identity.id, name: this.net.name }),
       send: (id, msg) => this.net.send(id, msg),
       isOnline: (id) => this.net.isOnline(id),
+      reachable: (id) => this.net.elsewhere(id).length > 0,
+      noticeInvite: (id, gid, text) => {
+        this.net.sendNotice(id, { id: `race-${gid}`, kind: 'invite', title: this.net.name, body: text, ttlMs: INVITE_NOTICE_TTL });
+      },
+      withdrawInvite: (id, gid) => this.net.withdrawNotice(`race-${gid}`, id),
+      announce: (from, gid, text) => this.net.noteLocally(from, { id: `race-${gid}`, kind: 'invite', title: this.peerName(from), body: text }),
       isFriend: (id) => this.contacts.get(id)?.state === 'accepted',
       nameOf: (id) => this.peerName(id),
       changed: () => this.changed(),
@@ -152,10 +168,12 @@ export class AppStore {
 
   async start(): Promise<void> {
     await this.net.start();
+    this.started = true;
     this.changed();
   }
 
   async stop(): Promise<void> {
+    this.started = false;
     this.games.leave();
     this.games.stop();
     this.toasts.stop();
@@ -177,6 +195,8 @@ export class AppStore {
     this.notifyQueued = true;
     queueMicrotask(() => {
       this.notifyQueued = false;
+      // open invites, for termhub's badge (only while keyrace runs)
+      if (this.started) this.net.setWaiting(this.games.invites.size, true);
       for (const fn of this.listeners) fn();
     });
   }
@@ -214,6 +234,7 @@ export class AppStore {
       online,
       away: online && (p?.away ?? false),
       racing: online && p?.extra.racing === true,
+      elsewhere: online ? [] : this.net.elsewhere(id),
       status: p?.status ?? 'available',
       ...(p?.msg ? { statusMsg: p.msg } : {}),
     };
@@ -224,18 +245,18 @@ export class AppStore {
     return this.net.peerName(id);
   }
 
-  /** Accepted friends who are online right now (who can be invited). */
+  /** Accepted friends who can be invited: online here or in another app. */
   onlineFriends(): FriendView[] {
     return this.contacts
       .all()
-      .filter((c) => c.state === 'accepted' && this.isOnline(c.id))
+      .filter((c) => c.state === 'accepted' && this.games.canInvite(c.id))
       .map((c) => this.friend(c.id)!)
       .sort((a, b) => a.display.localeCompare(b.display));
   }
 
   dashboard(): DashboardData {
     const all = this.contacts.all().map((c) => this.friend(c.id)!);
-    const presence = (f: FriendView) => (f.state !== 'accepted' ? 4 : f.racing ? 0 : f.online && !f.away ? 1 : f.away ? 2 : 3);
+    const presence = (f: FriendView) => (f.state !== 'accepted' ? 5 : f.racing ? 0 : f.online && !f.away ? 1 : f.away ? 2 : f.elsewhere.length ? 3 : 4);
     const friends = all
       .filter((f) => f.state !== 'incoming')
       .sort(
@@ -302,6 +323,8 @@ export class AppStore {
             '(Windows: allow Node.js for public networks · macOS: allow incoming connections for node).',
           'error',
         );
+      case 'notice':
+        return this.showToast(noticeLine(e.notice));
       case 'linked':
         return;
     }

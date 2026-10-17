@@ -19,6 +19,7 @@ import { modeDialog } from './components/ModeDialog.js';
 import { Race } from './screens/Race.js';
 import { Results } from './screens/Results.js';
 import { theme } from 'termcore/ui/theme';
+import { elsewhereText } from 'termcore/ui/presence';
 
 type Phase = { name: 'onboarding' } | { name: 'starting' } | { name: 'ready'; store: AppStore } | { name: 'error'; message: string };
 
@@ -147,7 +148,7 @@ export function Main({ store, width, height, rows, quit }: { store: AppStore; wi
           store.games.solo(settings);
           return;
         }
-        const options = friends.map((f) => ({ id: f.id, label: f.display, hint: f.racing ? 'racing' : f.away ? 'away' : 'online' }));
+        const options = friends.map((f) => ({ id: f.id, label: f.display, hint: !f.online ? elsewhereText(f.elsewhere) : f.racing ? 'racing' : f.away ? 'away' : 'online' }));
         const ids = await a.pick('Invite friends', options, true, {
           emptyOk: true,
           preselect: preselect?.filter((id) => friends.some((f) => f.id === id)),

@@ -13,6 +13,7 @@ import { cleanPaste, emptyEditor, type EditorState } from 'termcore/ui/editor';
 import { useTicker } from 'termcore/ui/hooks';
 import { useWheel } from 'termcore/ui/mouse';
 import { icons, senderHex, theme } from 'termcore/ui/theme';
+import { elsewhereText } from 'termcore/ui/presence';
 
 interface Props {
   store: AppStore;
@@ -57,7 +58,7 @@ export function Lobby({ store, game, width, height, actions, dialog }: Props) {
     const options = store
       .onlineFriends()
       .filter((f) => !inLobby.has(f.id))
-      .map((f) => ({ id: f.id, label: f.display, hint: f.racing ? 'racing' : f.away ? 'away' : 'online' }));
+      .map((f) => ({ id: f.id, label: f.display, hint: !f.online ? elsewhereText(f.elsewhere) : f.racing ? 'racing' : f.away ? 'away' : 'online' }));
     if (!options.length) return store.showToast('No other friends online', 'info');
     const ids = await actions.pick('Invite more friends', options, true);
     if (ids?.length) store.games.inviteMore(ids);

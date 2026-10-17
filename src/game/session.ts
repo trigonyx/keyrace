@@ -70,6 +70,14 @@ export interface GameDeps {
   me(): Who;
   send(id: string, msg: Wire): boolean;
   isOnline(id: string): boolean;
+  /** not online in keyrace, but in another app: an invite reaches them as a notice there */
+  reachable?(id: string): boolean;
+  /** tell them in their other app that they're invited (they open keyrace, then the invite comes) */
+  noticeInvite?(id: string, gid: string, text: string): void;
+  /** that invite is over */
+  withdrawInvite?(id: string, gid: string): void;
+  /** an invite reached us: my other apps may show it */
+  announce?(from: string, gid: string, text: string): void;
   /** accepted, unblocked friend – only they can invite us */
   isFriend(id: string): boolean;
   nameOf(id: string): string;
@@ -130,6 +138,8 @@ export class GameManager {
   private wasRacing = false;
   private readonly t: Tuning;
   private readonly now: () => number;
+  /** invited through a notice (they don't have keyrace open yet): id → lobby */
+  private noticed = new Map<string, string>();
 
   constructor(private readonly deps: GameDeps) {
     this.t = { ...DEFAULT_TUNING, ...deps.tuning };
@@ -148,11 +158,25 @@ export class GameManager {
     this.clearTimers();
   }
 
+  /** Online here, or in another app (the invite goes there as a notice). */
+  canInvite(id: string): boolean {
+    return this.deps.isFriend(id) && (this.deps.isOnline(id) || (this.deps.reachable?.(id) ?? false));
+  }
+
+  /** Invites that went out as notices are over (`ids`: only theirs). */
+  private retract(ids?: string[]): void {
+    for (const [id, gid] of [...this.noticed]) {
+      if (ids && !ids.includes(id)) continue;
+      this.noticed.delete(id);
+      this.deps.withdrawInvite?.(id, gid);
+    }
+  }
+
   // ───────────── Starting ─────────────
 
   /** New race: invites the given friends (none = solo practice). */
   create(settings: RaceSettings, inviteIds: string[]): void {
-    const ids = this.capped(inviteIds.filter((id) => this.deps.isFriend(id) && this.deps.isOnline(id)), 1);
+    const ids = this.capped(inviteIds.filter((id) => this.canInvite(id)), 1);
     if (!ids.length) return this.solo(settings);
     this.leave();
     const me = this.deps.me();
@@ -205,7 +229,27 @@ export class GameManager {
     if (!h) return;
     const { mode, param } = h.lobby.settings;
     const ok = this.deps.send(id, { t: 'invite', gid: h.lobby.gid, mode, param, players: this.wirePlayers(h.lobby) });
-    if (!ok) this.lobby = L.leave(h.lobby, id);
+    if (ok) {
+      if (this.noticed.get(id) === h.lobby.gid) {
+        this.noticed.delete(id);
+        this.deps.withdrawInvite?.(id, h.lobby.gid);
+      }
+      return;
+    }
+    if (this.deps.reachable?.(id) && this.deps.noticeInvite) {
+      // they have another app open: it tells them, and once their keyrace connects the invite follows
+      if (this.noticed.get(id) !== h.lobby.gid) this.deps.noticeInvite(id, h.lobby.gid, `invites you to ${settingsPhrase(h.lobby.settings)}`);
+      this.noticed.set(id, h.lobby.gid);
+      return;
+    }
+    this.lobby = L.leave(h.lobby, id);
+  }
+
+  /** A friend's keyrace connected: an invite they got as a notice comes now. */
+  onPeerOnline(id: string): void {
+    const h = this.hosting;
+    if (!h || h.game.phase !== 'lobby' || this.noticed.get(id) !== h.lobby.gid) return;
+    if (L.playerOf(h.lobby, id)?.status === 'invited') this.sendInvite(id);
   }
 
   /** After every lobby change: arm or cancel the automatic start, tell everyone who joined. */
@@ -242,7 +286,7 @@ export class GameManager {
     if (!h || h.game.phase !== 'lobby') return;
     // everyone ever invited stays listed (declined, left …), so only newcomers need room
     const known = new Set(h.lobby.players.map((p) => p.id));
-    const wanted = ids.filter((id) => this.deps.isFriend(id) && this.deps.isOnline(id));
+    const wanted = ids.filter((id) => this.canInvite(id));
     const newcomers = this.capped(wanted.filter((id) => !known.has(id)), h.lobby.players.length);
     const who = wanted.filter((id) => known.has(id) || newcomers.includes(id)).map((id) => ({ id, name: this.deps.nameOf(id) }));
     this.lobby = L.invite(h.lobby, who);
@@ -266,6 +310,7 @@ export class GameManager {
     this.lobby = lobby;
     if (was === 'joined') this.deps.send(id, { t: 'kick', gid: lobby.gid });
     else if (was === 'invited') this.deps.send(id, { t: 'invite_cancel', gid: lobby.gid, reason: 'closed' });
+    this.retract([id]);
     this.lobbyChanged();
   }
 
@@ -281,6 +326,7 @@ export class GameManager {
     const { lobby, withdrawn, racers } = L.start(h.lobby);
     this.lobby = lobby;
     for (const p of withdrawn) this.deps.send(p.id, { t: 'invite_cancel', gid: lobby.gid, reason: 'started' });
+    this.retract();
     if (this.autoTimer) clearTimeout(this.autoTimer);
     this.autoTimer = null;
     h.game.autoStartAt = null;
@@ -538,6 +584,7 @@ export class GameManager {
 
   private reset(): void {
     this.clearTimers();
+    this.retract();
     this.game = null;
     this.lobby = null;
     this.lastSent = '';
@@ -695,6 +742,7 @@ export class GameManager {
     if (!this.deps.quiet?.()) {
       this.deps.toast(text, 'info');
       this.deps.notify('keyrace', text);
+      this.deps.announce?.(from, m.gid, `invites you to ${settingsPhrase(inv.settings)}`);
     }
     this.deps.changed();
   }

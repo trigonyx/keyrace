@@ -14,7 +14,7 @@ import { panelHeight, StatsPanel } from '../components/StatsPanel.js';
 import { cleanPaste, edit, emptyEditor, type EditorState } from 'termcore/ui/editor';
 import { useWheel } from 'termcore/ui/mouse';
 import { icons, theme, personHex } from 'termcore/ui/theme';
-import { presenceDot, statusText } from 'termcore/ui/presence';
+import { elsewhereDot, elsewhereText, presenceDot, statusText } from 'termcore/ui/presence';
 import { useCommandInput } from './useCommandInput.js';
 
 type Entry =
@@ -50,6 +50,7 @@ function friendStatus(f: FriendView): { icon: string; color: string; text: strin
     case 'blocked':
       return { icon: icons.error, color: theme.error, text: 'blocked' };
     default: {
+      if (!f.online && f.elsewhere.length) return { ...elsewhereDot(), text: elsewhereText(f.elsewhere) };
       if (!f.online) return { icon: icons.offline, color: theme.faint, text: 'offline' };
       // their status (busy, do not disturb, a message) comes with their presence
       const status = statusText(f.status, f.statusMsg);
@@ -133,7 +134,7 @@ export function Dashboard({ store, width, height, rows, actions, dialog, selecte
     if (e.type === 'nearby') return attempt(() => store.requestNearby(e.peer.id));
     const f = e.friend;
     if (f.state === 'accepted') {
-      if (!f.online) return store.showToast(`${f.display} is offline`, 'error');
+      if (!f.online && !f.elsewhere.length) return store.showToast(`${f.display} is offline`, 'error');
       if (f.racing) return store.showToast(`${f.display} is racing right now – try again in a moment`, 'info');
       return void actions.newRace([f.id]);
     }
